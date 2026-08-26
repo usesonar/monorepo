@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  pull_request:
+    branches:
+      - staging
+      - main
+  push:
+    branches:
+      - staging
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: setup
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: true
+      - name: dependencies
+        run: bun install --frozen-lockfile
+      - name: check
+        run: just check
+      - name: build
+        run: just build
+      - name: verify packages
+        run: |
+          bun run check:packages
+          npm pack --dry-run --json --ignore-scripts ./packages/eve > "$RUNNER_TEMP/eve-pack.json"
+          npm pack --dry-run --json --ignore-scripts ./packages/react > "$RUNNER_TEMP/react-pack.json"
+          for pack_json in "$RUNNER_TEMP/eve-pack.json" "$RUNNER_TEMP/react-pack.json"; do
+            jq -e '
+              def package: if type == "array" then .[0] else to_entries[0].value end;
+              package.files | map(.path) | sort == [
+                "CHANGELOG.md",
+                "LICENSE",
+                "README.md",
+                "dist/index.d.ts",
+                "dist/index.js",
+                "package.json"
+              ]
+            ' "$pack_json" >/dev/null
+          done
+      - name: changeset status
+        if: github.event_name == 'pull_request'
+        run: bun changeset status --since="${{ github.event.pull_request.base.sha }}"

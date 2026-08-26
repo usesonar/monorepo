@@ -1,0 +1,4 @@
+[tools]
+bun = "1.4"
+just = "1.40"
+node = "24"

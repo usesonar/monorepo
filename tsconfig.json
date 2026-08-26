@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "verbatimModuleSyntax": true,
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "noEmit": true
+  },
+  "files": [],
+  "references": [
+    { "path": "./packages/eve" },
+    { "path": "./packages/react" },
+    { "path": "./apps/next" }
+  ]
+}

@@ -1,0 +1,42 @@
+{
+  "name": "@usesonar/react",
+  "version": "0.0.0",
+  "description": "Package scaffold for the future Sonar React integration.",
+  "homepage": "https://github.com/usesonar/monorepo/tree/main/packages/react#readme",
+  "bugs": {
+    "url": "https://github.com/usesonar/monorepo/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/usesonar/monorepo.git",
+    "directory": "packages/react"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral",
+    "prepack": "bun run build"
+  },
+  "peerDependencies": {
+    "react": "^19.2.8"
+  }
+}

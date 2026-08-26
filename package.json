@@ -1,0 +1,33 @@
+{
+  "name": "@usesonar/monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "bun run --filter '@usesonar/eve' build && bun run --filter '@usesonar/react' build",
+    "check": "ultracite check",
+    "check:packages": "publint packages/eve && publint packages/react && attw --pack packages/eve --profile esm-only && attw --pack packages/react --profile esm-only",
+    "changeset": "changeset",
+    "changeset:status": "changeset status",
+    "fix": "ultracite fix",
+    "release": "changeset publish",
+    "typecheck": "tsc -b --pretty false",
+    "test": "bun test --pass-with-no-tests",
+    "version-packages": "changeset version"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "0.18.5",
+    "@changesets/changelog-github": "1.0.0",
+    "@changesets/cli": "3.0.1",
+    "oxfmt": "0.63.0",
+    "oxlint": "1.78.0",
+    "publint": "0.3.24",
+    "tsdown": "0.22.14",
+    "typescript": "7.0.2",
+    "ultracite": "7.10.4"
+  },
+  "packageManager": "bun@1.4.0"
+}

@@ -1,0 +1,128 @@
+name: release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      NPM_CONFIG_PROVENANCE: "false"
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+    steps:
+      - name: checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+      - name: setup
+        uses: jdx/mise-action@v3
+        with:
+          install: true
+          cache: false
+      - name: setup npm
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-wrapper"
+          cat > "$RUNNER_TEMP/npm-wrapper/npm" <<'SCRIPT'
+          #!/usr/bin/env bash
+          exec npx --yes npm@12.0.2 "$@"
+          SCRIPT
+          chmod +x "$RUNNER_TEMP/npm-wrapper/npm"
+          echo "$RUNNER_TEMP/npm-wrapper" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/npm-wrapper/npm" --version
+      - name: dependencies
+        run: bun install --frozen-lockfile
+      - name: check
+        run: just check
+      - name: build
+        run: just build
+      - name: verify packages
+        run: bun run check:packages
+      - name: version
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          release_plan="$RUNNER_TEMP/changeset-status.json"
+          bun changeset status --output="$release_plan"
+
+          if [ "$(jq '.releases | length' "$release_plan")" -eq 0 ]; then
+            echo "No pending changesets; checking current package versions for publication."
+            exit 0
+          fi
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          bun changeset version
+          bun install --lockfile-only
+          git add .changeset bun.lock \
+            packages/eve/package.json packages/eve/CHANGELOG.md \
+            packages/react/package.json packages/react/CHANGELOG.md
+
+          if git diff --cached --quiet; then
+            echo "Changesets produced no version changes."
+            exit 0
+          fi
+
+          git commit -m "chore(release): version packages"
+          git push origin HEAD:main
+      - id: registry
+        name: inspect registry
+        run: |
+          bootstrap_required=false
+          unpublished=false
+
+          for package_dir in packages/eve packages/react; do
+            package_name="$(jq -r '.name' "$package_dir/package.json")"
+            package_version="$(jq -r '.version' "$package_dir/package.json")"
+
+            if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+              echo "$package_name@$package_version is already published."
+            elif [ "$package_version" = "0.0.0" ]; then
+              echo "::error::$package_name@0.0.0 requires the documented manual npm bootstrap."
+              bootstrap_required=true
+            else
+              echo "$package_name@$package_version is not published yet."
+              unpublished=true
+            fi
+          done
+
+          if [ "$bootstrap_required" = "true" ]; then
+            exit 1
+          fi
+
+          echo "unpublished=$unpublished" >> "$GITHUB_OUTPUT"
+      - name: publish
+        if: steps.registry.outputs.unpublished == 'true'
+        run: bun changeset publish
+      - name: verify publication and push tags
+        if: steps.registry.outputs.unpublished == 'true'
+        run: |
+          for package_dir in packages/eve packages/react; do
+            package_name="$(jq -r '.name' "$package_dir/package.json")"
+            package_version="$(jq -r '.version' "$package_dir/package.json")"
+            published_version="$(npm view "$package_name@$package_version" version)"
+
+            if [ "$published_version" != "$package_version" ]; then
+              echo "::error::$package_name@$package_version was not published."
+              exit 1
+            fi
+
+            package_tag="$package_name@$package_version"
+            if ! git rev-parse --verify --quiet "refs/tags/$package_tag" >/dev/null; then
+              git tag "$package_tag"
+            fi
+          done
+
+          git push origin --tags
