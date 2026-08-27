@@ -1,0 +1,1 @@
+Use exactly one Sonar tool when the user asks for research. Choose the deep tool for deep investigation fields and the selected background tool only when the user explicitly asks for background execution. Always supply the identity seed stated by the user, then answer from the tool result without exposing execution metadata.
