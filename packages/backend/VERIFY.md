@@ -1,0 +1,26 @@
+# Backend verifier
+
+Run this package's contract suite with `bun test packages/backend/src/contract.test.ts`. Run the repository checks after the implementation exists with `just fmt` and `just check`. The contract suite intentionally imports the test-only `@usesonar/backend/testing` harness; a missing harness or backend package is a FAIL, not a reason to weaken a condition.
+
+## Required conditions
+
+| ID | Condition | PASS | FAIL |
+| --- | --- | --- | --- |
+| VLD-001 | Route, method, body, content type, seed, config, field/tier, custom-key, TTL, and Accept validation | A valid seed uses `linkedinURL`, `fullName` plus `xURL`, or `fullName` plus `email`; each branch may include `domain` and JSON `context`. Domain alone and other invalid input receive the documented safe 4xx and start no run. | Invalid input is accepted, starts a run, leaks internals, or negotiates an unsupported representation. |
+| AUTH-001 | Capability-key authentication and tenant derivation | Only a configured key authenticates, and the tenant comes from that key. A publishable key with a nonempty allowlist requires a present allowlisted `Origin`; a configured secret key can omit `Origin`. | Body tenant input, a missing/bad key, or a publishable key with a missing or nonallowlisted origin can select a tenant. |
+| HASH-001 | Canonical, tenant-scoped HMAC run identity | Equivalent normalized requests within a tenant share a hash; route, tenant, and TTL changes do not. The value matches HMAC-SHA256 using the test server secret. Normalization covers seed whitespace and allowed casing, plus property and selected-field order. | A normalized equivalent changes identity, or a tenant can predict/share another tenant's run. |
+| RUN-001 | Idempotent, concurrent run creation | Repeated and simultaneous POSTs name one run and start one orchestration. | Duplicate work starts or callers receive different hashes for the same canonical request. |
+| SSE-001 | Snapshot, ordering, replay, and disconnect semantics | Snapshot ID is `0`; field IDs are contiguous; reconnect replays only missed events; complete occurs once after terminal settlement. | A field is absent, event order/indexing is unstable, replay duplicates delivered events, or disconnect cancels work. |
+| TERM-001 | Terminal state and dependency gates | The established consumer-email phone case is skipped; failed identity gates dependent fields; provider timeouts become `{ status: "notFound", reason: "timeout" }`; provider values are validated against their catalog path; completion waits for all terminal fields. | A gated provider runs, an invalid provider value reaches a public snapshot, a field remains pending forever, or a terminal field later changes. |
+| CACHE-001 | Field cache scope and freshness | Positive built-ins share across tenants, negative results expire at exactly `min(ttl, 5m)`, custom answers stay tenant-scoped, and skipped values never cache. | A cache crosses the wrong boundary, ignores request TTL, or invokes a provider when a valid entry exists. |
+| READ-001 | Tenant-safe JSON snapshots and errors | POST JSON and GET return public snapshots only; known hashes from another tenant are indistinguishable from absent hashes; client errors are safe. | A read leaks another tenant's run, provider/job/cache/Layer detail, a secret, or a stack trace. |
+| LAYER-001 | Effect v4 composition and scope cleanup | The handler is driven by deterministic in-memory Layers; each request/subscription finalizes its scope while the same in-memory run remains alive after disconnect; closing is idempotent and safely finalizes unlocked or consumer-locked SSE bodies through the server-owned subscription. | The package relies on Next, Redis, Workflow, SDK/network credentials, mutable global test state, rejects shutdown for a locked reader, or leaks a scope/finalizer. |
+| ROOT-001 | Production root handler seam | `SonarBackend` has an Effect Context tag shape, and `layer` plus `createSonarHandler` build the exercised Fetch handler from the deterministic Layer input. | A test-only wrapper substitutes for the production handler, or the package does not expose the locked root seam. |
+
+## Deferred claims
+
+These are deliberately outside this private-backend verifier: dashboard key management, browser origin policy beyond deterministic capability checks, live provider accuracy, provider retries and billing, deployment infrastructure, Redis durability, Vercel Workflow semantics, and any public package release surface. They need integration or deployment verification once those systems exist.
+
+## Test seam contract
+
+`@usesonar/backend/testing` is test-only. `createBackendTestHarness` must use `TestTenant` keys, a `FakeScenario`, a fake clock, a declared server HMAC secret, and in-memory Effect Layers. Its returned harness exposes `fetch`, deterministic settlement/clock controls, provider/cache/run probes, disconnect control, and `close`; none of those controls may be exported from the production handler. `inspect` may reveal test counters, emitted events, and finalizer counts, and its keyed probes must preserve every schema-valid custom answer name as an own key with the declared value type, but public HTTP bodies may not reveal any implementation detail. The production seam is `SonarBackend` (an Effect `Context.Service`), its `layer`, and `createSonarHandler`.

@@ -1,0 +1,17 @@
+{
+  "name": "@usesonar/backend",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "dependencies": {
+    "@usesonar/api": "workspace:*",
+    "@usesonar/effect": "workspace:*",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "bun-types": "1.4.0"
+  }
+}
