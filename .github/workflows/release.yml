@@ -13,6 +13,7 @@ concurrency:
 permissions:
   contents: write
   id-token: write
+  pull-requests: read
 
 jobs:
   release:
@@ -49,6 +50,23 @@ jobs:
         run: just build
       - name: verify packages
         run: bun run check:packages
+      - name: verify npm bootstrap
+        run: |
+          bootstrap_required=false
+
+          for package_dir in packages/api packages/effect packages/react packages/eve; do
+            package_name="$(jq -r '.name' "$package_dir/package.json")"
+            package_version="$(jq -r '.version' "$package_dir/package.json")"
+
+            if [ "$package_version" = "0.0.0" ] && ! npm view "$package_name@$package_version" version >/dev/null 2>&1; then
+              echo "::error::$package_name@0.0.0 requires the documented manual npm bootstrap."
+              bootstrap_required=true
+            fi
+          done
+
+          if [ "$bootstrap_required" = "true" ]; then
+            exit 1
+          fi
       - name: version
         env:
           GITHUB_TOKEN: ${{ github.token }}
@@ -56,7 +74,7 @@ jobs:
           release_plan="$RUNNER_TEMP/changeset-status.json"
           bun changeset status --output="$release_plan"
 
-          if [ "$(jq '.releases | length' "$release_plan")" -eq 0 ]; then
+          if [ "$(jq '.changesets | length' "$release_plan")" -eq 0 ]; then
             echo "No pending changesets; checking current package versions for publication."
             exit 0
           fi
@@ -67,6 +85,8 @@ jobs:
           bun changeset version
           bun install --lockfile-only
           git add .changeset bun.lock \
+            packages/api/package.json packages/api/CHANGELOG.md \
+            packages/effect/package.json packages/effect/CHANGELOG.md \
             packages/eve/package.json packages/eve/CHANGELOG.md \
             packages/react/package.json packages/react/CHANGELOG.md
 
@@ -75,41 +95,32 @@ jobs:
             exit 0
           fi
 
-          git commit -m "chore(release): version packages"
+          git commit -m "chore(release): apply changesets"
           git push origin HEAD:main
       - id: registry
         name: inspect registry
         run: |
-          bootstrap_required=false
           unpublished=false
 
-          for package_dir in packages/eve packages/react; do
+          for package_dir in packages/api packages/effect packages/react packages/eve; do
             package_name="$(jq -r '.name' "$package_dir/package.json")"
             package_version="$(jq -r '.version' "$package_dir/package.json")"
 
             if npm view "$package_name@$package_version" version >/dev/null 2>&1; then
               echo "$package_name@$package_version is already published."
-            elif [ "$package_version" = "0.0.0" ]; then
-              echo "::error::$package_name@0.0.0 requires the documented manual npm bootstrap."
-              bootstrap_required=true
             else
               echo "$package_name@$package_version is not published yet."
               unpublished=true
             fi
           done
 
-          if [ "$bootstrap_required" = "true" ]; then
-            exit 1
-          fi
-
           echo "unpublished=$unpublished" >> "$GITHUB_OUTPUT"
       - name: publish
         if: steps.registry.outputs.unpublished == 'true'
         run: bun changeset publish
       - name: verify publication and push tags
-        if: steps.registry.outputs.unpublished == 'true'
         run: |
-          for package_dir in packages/eve packages/react; do
+          for package_dir in packages/api packages/effect packages/react packages/eve; do
             package_name="$(jq -r '.name' "$package_dir/package.json")"
             package_version="$(jq -r '.version' "$package_dir/package.json")"
             published_version="$(npm view "$package_name@$package_version" version)"

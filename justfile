@@ -1,19 +1,19 @@
 fmt:
-  bunx ultracite fix
+  mise exec -- bunx ultracite fix
 
 lint:
-  bunx ultracite check
+  mise exec -- bunx ultracite check
 
 typecheck:
-  bun run typecheck
+  mise exec -- bun run typecheck
 
 test:
-  bun run test
+  mise exec -- bun run test
 
 check: lint typecheck test
 
 build:
-  bun run build
+  mise exec -- bun run build
 
 check-packages: build
-  bun run check:packages
+  mise exec -- bun run check:packages

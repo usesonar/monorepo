@@ -38,9 +38,11 @@ jobs:
       - name: verify packages
         run: |
           bun run check:packages
-          npm pack --dry-run --json --ignore-scripts ./packages/eve > "$RUNNER_TEMP/eve-pack.json"
-          npm pack --dry-run --json --ignore-scripts ./packages/react > "$RUNNER_TEMP/react-pack.json"
-          for pack_json in "$RUNNER_TEMP/eve-pack.json" "$RUNNER_TEMP/react-pack.json"; do
+          for package_dir in packages/api packages/effect packages/react packages/eve; do
+            package_slug="${package_dir#packages/}"
+            npm pack --dry-run --json --ignore-scripts "./$package_dir" > "$RUNNER_TEMP/$package_slug-pack.json"
+          done
+          for pack_json in "$RUNNER_TEMP/api-pack.json" "$RUNNER_TEMP/react-pack.json" "$RUNNER_TEMP/eve-pack.json"; do
             jq -e '
               def package: if type == "array" then .[0] else to_entries[0].value end;
               package.files | map(.path) | sort == [
@@ -53,6 +55,35 @@ jobs:
               ]
             ' "$pack_json" >/dev/null
           done
+          jq -e '
+            def package: if type == "array" then .[0] else to_entries[0].value end;
+            package.files | map(.path) as $files |
+            [
+              "CHANGELOG.md",
+              "LICENSE",
+              "README.md",
+              "dist/index.d.ts",
+              "dist/index.js",
+              "dist/testing.d.ts",
+              "dist/testing.js",
+              "package.json"
+            ] as $required |
+            ($required - $files | length) == 0 and
+            ($files | map(select(test("^dist/client-[A-Za-z0-9_-]+\\.d\\.ts$"))) | length) == 1 and
+            ($files | map(select(test("^dist/identity-[A-Za-z0-9_-]+\\.js$"))) | length) == 1 and
+            ($files | map(select(
+              . == "CHANGELOG.md" or
+              . == "LICENSE" or
+              . == "README.md" or
+              . == "dist/index.d.ts" or
+              . == "dist/index.js" or
+              . == "dist/testing.d.ts" or
+              . == "dist/testing.js" or
+              . == "package.json" or
+              test("^dist/client-[A-Za-z0-9_-]+\\.d\\.ts$") or
+              test("^dist/identity-[A-Za-z0-9_-]+\\.js$")
+            ))) == $files
+          ' "$RUNNER_TEMP/effect-pack.json" >/dev/null
       - name: changeset status
         if: github.event_name == 'pull_request'
         run: bun changeset status --since="${{ github.event.pull_request.base.sha }}"

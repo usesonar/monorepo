@@ -1,16 +1,29 @@
 {
   "compilerOptions": {
+    "allowImportingTsExtensions": true,
     "strict": true,
     "noUncheckedIndexedAccess": true,
     "verbatimModuleSyntax": true,
     "module": "Preserve",
     "moduleResolution": "bundler",
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@usesonar/api": ["./packages/api/src/index.ts"],
+      "@usesonar/backend": ["./packages/backend/src/index.ts"],
+      "@usesonar/backend/testing": ["./packages/backend/src/testing.ts"],
+      "@usesonar/effect": ["./packages/effect/src/index.ts"],
+      "@usesonar/effect/testing": ["./packages/effect/src/testing.ts"],
+      "@usesonar/eve": ["./packages/eve/src/index.ts"],
+      "@usesonar/react": ["./packages/react/src/index.ts"]
+    }
   },
   "files": [],
   "references": [
-    { "path": "./packages/eve" },
+    { "path": "./packages/api" },
+    { "path": "./packages/effect" },
+    { "path": "./packages/backend" },
     { "path": "./packages/react" },
+    { "path": "./packages/eve" },
     { "path": "./apps/next" }
   ]
 }
