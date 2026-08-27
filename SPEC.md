@@ -1,383 +1,281 @@
-# Sonar — Handoff Spec (v2)
+# Sonar product contract (v3)
 
-Code name: **Sonar** (rename later). Schema-in, Sonar-out enrichment API with three surfaces: React hooks, eve agent tools, REST.
+Sonar turns a thin identity seed and a requested schema into progressive person and company data. This version defines one observable contract across the raw API, Effect, React, Eve, and the private backend.
 
-## What it is
+The repository implements the package foundation and a deterministic in-memory backend. A hosted service, provider integrations, durable storage, billing, and the `apps/next` product remain outside this scope.
 
-A customer's user signs up (Google, X, LinkedIn, email). The customer sends the thin identity seed they got plus a list of what they want to know about that person and their company. Sonar fans out to upstream providers, resolves each field independently, caches each field independently, and streams results back as they land. The customer never sees providers, latency tiers, job IDs, or hashes.
+## Surfaces and dependency direction
 
-Two tiers, with a meaning a customer can hold in their head:
+| Workspace | Visibility | Responsibility |
+| --- | --- | --- |
+| `@usesonar/api` | Public | Zod wire schemas, raw Ky client, JSON helpers, and POST-SSE transport |
+| `@usesonar/effect` | Public | Effect 4 service, Layers, Streams, typed errors, protocol reducer, and deterministic scenarios |
+| `@usesonar/backend` | Private | Effect Fetch handler and deterministic in-memory auth, run, hash, cache, and provider seams |
+| `@usesonar/react` | Public | React provider and hooks backed by TanStack streamed queries |
+| `@usesonar/eve` | Public | Static and dynamic Eve tool factories |
+| `apps/next` | Private | Reserved for the hosted product; not part of the implemented request path |
 
-- **research** — _lookup_. Identity, public profile, brand, funding, quick web questions. Seconds.
-- **deepResearch** — _investigation_. Things an agent has to go do: phone numbers, legal entity names, hard questions. Minutes.
+Dependencies flow from API to Effect, then from Effect to React and Eve. Public packages never import the private backend, app code, provider SDKs, or sibling source files.
 
-Every surface exposes both tiers with the same three-slot config: `person`, `company`, and either `research` or `deepResearch`.
+## Shared request contract
 
-## User story
+### Identity seed
 
-A tax SaaS adds "Sign in with Google." On sign-in they call `resolve({ email, name })` from `useSonar`. Within seconds `company.domain`, `company.logo`, `company.colors` fill in and their onboarding screen is branded. They also called `useDeepSonar`, so `person.phone` and `company.legalName` show as skeletons and land over the next few minutes. They push the result to HubSpot. Fifteen lines of code, never learned what Sixtyfour or Firecrawl are.
-
-Their internal eve agent has the same two things as tools, `researchSonar` and `deepResearchSonar`, from two two-line files.
-
-## Field catalog
-
-Person always listed before company, everywhere.
-
-**research tier**
-
-| Slot       | Fields                                      | Provider                            |
-| ---------- | ------------------------------------------- | ----------------------------------- |
-| `person`   | `linkedin`                                  | Identify stage                      |
-| `person`   | `title, x, github`                          | Exa                                 |
-| `company`  | `domain`                                    | Identify stage                      |
-| `company`  | `name, logo, colors, location, description` | Firecrawl (one scrape, five fields) |
-| `company`  | `funding`                                   | Parallel                            |
-| `research` | custom keys, value = question               | Parallel task API                   |
-
-**deepResearch tier**
-
-| Slot           | Fields                        | Provider                                                                                     |
-| -------------- | ----------------------------- | -------------------------------------------------------------------------------------------- |
-| `person`       | `phone`                       | Sixtyfour. Corporate email only.                                                             |
-| `company`      | `legalName`                   | Custom browser-use agent (Cyrus has a method; treat as black box `resolveLegalName(domain)`) |
-| `deepResearch` | custom keys, value = question | Sixtyfour                                                                                    |
-
-Validation: a field from the wrong tier is a 400 with a message naming the right route/tool. Custom keys are camelCase identifiers; `ttl`, `person`, `company`, `research`, `deepResearch` are reserved.
-
-## Field shape
-
-Every leaf on every surface:
+A seed must satisfy at least one of three prerequisites:
 
 ```ts
-type Field<T> =
-  | { status: "pending" }
-  | { status: "resolved"; value: T; confidence: number; sources: string[]; resolvedAt: string }
-  | { status: "notFound"; reason?: "timeout" | "identityFailed" | "providerEmpty" }
-  | { status: "skipped"; reason: "consumerEmail" | "noPersonSeed" | "noCompanySeed" };
+type SonarSeed = (
+  | { linkedinURL: string }
+  | { fullName: string; xURL: string }
+  | { fullName: string; email: string }
+) & {
+  domain?: string
+  context?: Record<string, JSONValue>
+}
 ```
 
-Every requested field exists in the response from the first byte with `status: "pending"`. Top-level `status` is `"pending" | "complete"`; `complete` means every field has a terminal status.
+Supported identity fields can coexist, so a LinkedIn seed can also carry a name, an X URL, an email address, or a domain. `domain` and `context` add evidence but cannot form a seed by themselves. URLs and email addresses must be valid, names and domains must be non-empty, unknown properties are rejected, and `context` must contain JSON values.
 
-Seed, any subset, same on every surface:
+### TTL
+
+`ttl` is a compact integer duration with one of these units: `ms`, `s`, `m`, `h`, `d`, or `w`. The effective duration must be between 12 hours and 365 days, inclusive. Values such as `12h`, `7d`, and `52w` are valid; decimals, spaces, `11h`, `366d`, and `1y` are invalid.
+
+### Tiers and fields
+
+Person fields appear before company fields on every surface.
+
+| Tier | Person fields | Company fields | Custom question map |
+| --- | --- | --- | --- |
+| Research | `linkedin`, `title`, `x`, `github` | `domain`, `name`, `logo`, `colors`, `location`, `description`, `funding` | `research` |
+| Deep research | `phone` | `legalName` | `deepResearch` |
+
+A request cannot use a field from the other tier, and each built-in selection must be unique. Custom keys must be lower-camel identifiers, questions must be non-empty strings, and `ttl`, `person`, `company`, `research`, and `deepResearch` are reserved.
+
+### Flat request shape
+
+The request keeps its tier-specific question map and does not wrap configuration in another object:
 
 ```ts
-{ email?, name?, domain?, xHandle?, linkedinUrl? }
-```
-
-## React SDK
-
-```tsx
-import { useSonar, useDeepSonar } from "Sonar/react";
-
-const fast = useSonar({
-  ttl: "7d",
-  person: ["title", "linkedin", "x"],
-  company: ["name", "domain", "logo", "colors", "funding"],
-  research: { sellsToSmb: "Who does this company sell to?" },
-});
-
-const deep = useDeepSonar({
-  ttl: "7d",
-  person: ["phone"],
-  company: ["legalName"],
-  deepResearch: { usesQuickbooks: "Does this company use QuickBooks or Xero?" },
-});
-
-function onSignIn(user) {
-  fast.resolve({ email: user.email, name: user.name });
-  deep.resolve({ email: user.email, name: user.name });
+type ResearchRequest = {
+  seed: SonarSeed
+  ttl: TTL
+  person: readonly ResearchPersonField[]
+  company: readonly ResearchCompanyField[]
+  research: Readonly<Record<string, string>>
 }
 
-fast.status; // undefined | "pending" | "complete"
-fast.data; // null until resolve()
-fast.data?.company.logo.value;
-fast.data?.research.sellsToSmb.value;
-deep.data?.person.phone; // { status: "pending" } for a few minutes
-deep.data?.deepResearch.usesQuickbooks;
+type DeepResearchRequest = {
+  seed: SonarSeed
+  ttl: TTL
+  person: readonly DeepResearchPersonField[]
+  company: readonly DeepResearchCompanyField[]
+  deepResearch: Readonly<Record<string, string>>
+}
 ```
 
-- Both hooks return `{ resolve, data, status }` with identical field shapes.
-- Each hook opens its own SSE stream to its own route. No shared client state.
-- Config lives client-side and is visible to the end user. Accepted.
-- Publishable key is configured once via a provider or env; the hook reads it.
+### Typed questions
 
-## Eve SDK
+`@usesonar/api` owns `question<Answer>(prompt)`, and `@usesonar/effect` re-exports it for Effect, React, and Eve consumers. The helper returns the same prompt string with compile-time answer metadata, so a configured `accountSignals: question<AccountSignals>("...")` produces a top-level `Field<AccountSignals>`. A plain string or `question(prompt)` produces `Field<JSONValue>`. Selected built-ins retain their exact catalog types, and unselected built-ins remain absent. The brand declares the caller's expected TypeScript type; runtime custom answers are JSON-validated rather than structurally checked against that type.
 
-Two exports, two files, each a complete tool. Filename is the tool name the model sees; customers can rename.
+API create operations, Effect operations, React hooks, and static Eve factories derive answer types from their question map; they do not accept a separate operation-level answer map. Literal configs, spreads of literal configs, and `satisfies` preserve question brands and exact field selection. Finite question maps declared as interfaces or type aliases produce exact required fields. A broad annotation such as `ResearchConfig` or `Record<string, string>` erases question brands and exposes arbitrary custom reads as `Field<JSONValue> | undefined`; broad selection arrays similarly make catalog reads optional while preserving each catalog value type. Union, optional-keyed, callable, constructable, and numeric or symbol key hybrid maps are rejected.
+
+Raw `retrieveSonar(client, hash)` has no config from which to derive custom keys, so its default type does not claim any. `retrieveSonar<Answers>(client, hash)` is the one safe explicit map for callers that already know those keys. Dynamic Eve is the other exception because the model owns the question map at execution time; its type-only explicit map adds optional possible fields without requesting those keys or runtime-validating their answer shapes. Both explicit maps require finite, non-union interfaces or type aliases with required lower-camel keys. They reject callable or constructable maps and numeric or symbol key hybrids. Without an explicit dynamic map, Eve exposes optional built-in catalogs but does not invent custom names.
+
+## Shared result contract
+
+Every requested leaf has exactly one of four states:
 
 ```ts
-// agent/tools/researchSonar.ts
-import { researchSonar } from "Sonar/eve";
-
-export default researchSonar({
-  ttl: "7d",
-  person: ["title", "linkedin", "x", "github"],
-  company: ["name", "domain", "logo", "colors", "location", "funding"],
-  research: { sellsToSmb: "Who does this company sell to?" },
-});
+type Field<T = JSONValue> =
+  | { status: "pending" }
+  | {
+      status: "resolved"
+      value: T
+      confidence: number
+      sources: string[]
+      resolvedAt: string
+    }
+  | {
+      status: "notFound"
+      reason?: "timeout" | "identityFailed" | "providerEmpty"
+    }
+  | {
+      status: "skipped"
+      reason: "consumerEmail" | "noPersonSeed" | "noCompanySeed"
+    }
 ```
+
+The first snapshot contains every requested leaf as `pending`. A leaf then settles once to `resolved`, `notFound`, or `skipped`. The snapshot remains `pending` through field settlement and becomes `complete` only after an explicit completion event verifies that no field remains pending.
+
+Built-in fields stay nested, while custom answers become top-level fields after `person` and `company`:
 
 ```ts
-// agent/tools/deepResearchSonar.ts
-import { deepResearchSonar } from "Sonar/eve";
+type SonarSnapshot = {
+  status: "pending" | "complete"
+  data: {
+    person: Record<string, Field>
+    company: Record<string, Field>
+    [customAnswer: string]: Field | Record<string, Field>
+  }
+}
 
-export default deepResearchSonar({
-  ttl: "7d",
-  person: ["phone"],
-  company: ["legalName"],
-  deepResearch: { usesQuickbooks: "Does this company use QuickBooks or Xero?" },
-});
+type SonarResponse = SonarSnapshot & { hash: string }
 ```
 
-Both tools:
+For a request with `research: { accountSignals: "..." }`, the result is `data.accountSignals`, not `data.research.accountSignals`. Only the raw HTTP/API response can expose `hash`; Effect, React, and Eve return `SonarSnapshot` without it.
 
-- `inputSchema` is the seed. The model never sees hashes; the deep tool hashes the seed internally and lands on the right Sonar.
-- `description` is generated from config: lists the exact fields returned and the expected latency. The deep tool's description says it runs in the background, results arrive in a later turn, and to call it only after `researchSonar` succeeded.
-- `outputSchema` derived from config, typed end to end.
-- `toModelOutput` returns only resolved fields as `{ path: value, confidence }`. No pending, no sources, no skipped noise. Channels and hooks still get the full output.
-- Secret key from `process.env.Sonar_SECRET_KEY`.
-- Optional `dynamic: true`: moves `person`/`company`/`research` into `inputSchema` so the model picks fields per call; catalog goes in the description. Off by default.
+## HTTP and SSE protocol
 
-`researchSonar` is a normal tool using an async-generator `execute`: yields the full `data` snapshot on every field event, final yield is the settled data.
+The raw service contract has three routes:
 
-`deepResearchSonar` uses `execution: "background"` (requires `experimental.tasks` on the root agent). Returns `task.delegated(...)` immediately; the executor polls `GET /v1/{hash}` and calls `task.send({ kind: "complete", data })` when every field is terminal. Because `task.send` is not restart-safe, keep a reconciliation path: on process start, any task still `working` is re-polled by hash and completed from the durable server state. The Sonar itself never depends on the callback surviving.
-
-Eve replays completed steps and re-runs interrupted ones. Content-addressed POST is the idempotency key; a re-run lands on the same Sonar.
-
-Scaffold: `npx Sonar init eve` writes the two files and optionally `agent/skills/Sonar/SKILL.md` (when to enrich, how to read confidence, what `skipped: consumerEmail` means).
-
-## REST API
-
-```
-POST /v1/research        { seed, ttl, person, company, research }
-POST /v1/deepResearch    { seed, ttl, person, company, deepResearch }
+```text
+POST /v1/research
+POST /v1/deepResearch
 GET  /v1/{hash}
 ```
 
-`Authorization: Bearer <key>` on all three.
+Every route requires `Authorization: Bearer <capability>`. If allowed origins are configured for a publishable capability, requests using that capability must include a matching `Origin`. Secret-capability requests can omit `Origin`. The capability determines the tenant; request JSON cannot select one.
 
-`POST` with `Accept: text/event-stream` — the primary path. SSE stream of field events ending with `complete`. Both SDKs use this.
+A POST with `Accept: application/json` returns the current `SonarResponse`. Reposting a canonically identical request within one tenant names the same in-memory run. `GET /v1/{hash}` returns the latest raw snapshot for the authenticated tenant, while a foreign or unknown hash returns the same safe `404` response.
 
-```
-event: field
-data: { "path": "person.title", "status": "resolved", "value": "...", "confidence": 0.9, "sources": [...], "resolvedAt": "..." }
+A POST with `Accept: text/event-stream` emits:
 
-event: complete
-data: { "hash": "..." }
-```
-
-Every event carries an `id:` line equal to its index in the run's stream. Clients reconnecting send `Last-Event-ID` (browser `EventSource` does this automatically); the server passes it as `startIndex` when reattaching to the stream, so a reconnect resumes rather than replays. No query-param equivalent.
-
-`POST` with `Accept: application/json` — returns the current snapshot immediately:
-
-```json
-{ "hash": "...", "status": "pending" | "complete", "data": { "person": {...}, "company": {...}, "research": {...} } }
+```ts
+type SonarEvent =
+  | { id: string; type: "snapshot"; snapshot: SonarSnapshot }
+  | { id: string; type: "field"; path: string; field: Field }
+  | { id: string; type: "complete"; hash: string }
 ```
 
-Posting the same body again returns the same Sonar. There is no job to start, resume, or track.
+The snapshot is event ID `0` and contains the full all-pending data tree. Field IDs are contiguous from `1`, each field event is terminal, and `complete` appears once after every requested path settles. No event is accepted after completion.
 
-`GET /v1/{hash}` — snapshot only, same shape. Reads live cache, so a later GET can be more complete than the original POST.
+The raw client reconnects an interrupted POST-SSE stream up to three times by default. It sends the last accepted ID in `Last-Event-ID`, suppresses replayed IDs, and fails on duplicates within one connection, malformed events, premature completion, or a stream that exhausts its reconnect budget. Cancelling the returned stream or aborting its signal stops transport work immediately; disconnecting a client does not cancel the backend run.
 
-No webhooks.
+## Identity, authorization, and cache boundaries
 
-## Hashing
+The backend computes run identity as:
 
-`hash = sha256(tenantId + route + canonicalJson(seed) + canonicalJson(schema))`
+```text
+HMAC-SHA256(serverSecret, tenantId + route + canonicalSeed + canonicalConfig)
+```
 
-- Canonical: sorted keys; email and domain lowercased and trimmed; `@` stripped from `xHandle`.
-- `ttl` is excluded; it governs freshness, not identity.
-- `tenantId` is in the hash only so `GET /v1/{hash}` is tenant-scoped. It plays no role in caching.
+Canonicalization normalizes seed strings and URLs, recursively orders JSON object keys, orders selected fields, and includes the tier-specific questions and TTL. Changing the tenant, route, or TTL changes the hash. Equivalent property order, field order, casing, and surrounding whitespace normalize to the same request identity where the seed rules permit it.
 
-## Caching
+The hash is tenant-derived and unguessable without the server secret. Possessing another tenant's hash does not grant access, and cross-tenant reads are indistinguishable from unknown hashes.
 
-The Sonar is a view, not a cache entry. Every field is cached independently and cross-tenant. A request names a set of fields; each is looked up, misses are resolved, the response composes them. Adding one field to a schema costs one field.
+Fields cache independently:
 
-Cache keys:
+- Positive built-in fields can be reused across tenants when their identity and requested TTL remain fresh.
+- Custom answers are tenant-scoped because customer questions and answers cannot cross that boundary.
+- A `notFound` field expires after the shorter of the request TTL and five minutes.
+- A `skipped` field is never cached.
+- Positive freshness uses the field's `resolvedAt`, not its cache-write time.
 
-| What                                                  | Key                                                |
-| ----------------------------------------------------- | -------------------------------------------------- |
-| Identify result (`person.linkedin`, `company.domain`) | normalized seed                                    |
-| Company fields                                        | resolved domain                                    |
-| Person fields                                         | resolved person identity (LinkedIn URL)            |
-| Research and deep research keys                       | subject (domain or person) + sha256(question text) |
+## Raw API package
 
-TTL is applied per field at read time against `resolvedAt`. A field older than the request's `ttl` is re-resolved; otherwise it's returned as `resolved` immediately in Stage 0.
+`@usesonar/api` owns the Zod schemas and transport. `createSonar(options)` requires an absolute `baseURL` and exactly one non-empty `publishableKey` or `secretKey`, then returns the actual `KyInstance`. Callers retain Ky headers, hooks, retry, timeout, custom `fetch`, and `.extend()` behavior; Sonar sets the bearer authorization header from the selected capability.
 
-Provider raw results (e.g. a Firecrawl scrape) are cached separately below the field layer so one scrape can serve five fields across many requests.
+The JSON helpers are `createResearch`, `createDeepResearch`, and `retrieveSonar`. The stream helpers are `streamResearch` and `streamDeepResearch`. All helpers validate untrusted protocol data. HTTP failures retain Ky error behavior, schema failures retain Zod behavior, and SSE framing or protocol failures use `SonarStreamError`.
 
-Not v1: per-field default TTLs (linkedin 90d, colors 30d, title 14d). The shape allows it as one table later.
+## Effect package
 
-## Auth and keys
+`@usesonar/effect` targets Effect `4.0.0-rc.112`. `SonarClient` exposes research and deep-research Streams plus a retrieve Effect:
 
-- `pk_test_…` — publishable, browser-safe, `localhost` only.
-- `pk_live_…` — publishable, browser-safe, only from origins on the tenant's allowlist. Reject at the edge on `Origin` mismatch.
-- `sk_…` — secret, server-side, no origin check.
+```ts
+type SonarClientService = {
+  research(request): Stream.Stream<SonarSnapshot, SonarClientError>
+  deepResearch(request): Stream.Stream<SonarSnapshot, SonarClientError>
+  retrieve(hash, config): Effect.Effect<SonarSnapshot, SonarClientError>
+}
+```
 
-Self-serve for every tenant.
+`layer(options)` creates the raw API capability lazily with the same options as `createSonar`, while `layerFromAPI(client)` adapts an existing Ky instance. Tagged failures are `RequestError`, `TransportError`, `HTTPError`, and `ProtocolError`.
 
-## Resolution pipeline
+The Effect reducer keeps snapshots pending through terminal field events. A required `CompleteEvent` checks that no pending leaf remains before changing the snapshot to complete, and any event after completion fails.
 
-**Stage 0 — synchronous.** Normalize seed, compute hash, load every requested field from cache within `ttl`, classify email:
+`@usesonar/effect/testing` exports isolated `Scenario`, `scenarioLayer`, and `SonarTestProbe` primitives. They provide deterministic keyless Streams and request/interruption inspection without reading the environment or calling a network.
 
-- corporate: not on the freemail list (gmail, yahoo, outlook/hotmail/live, icloud, proton, aol, long tail) and not on a disposable-domain list
-- consumer: on the freemail list
-- none: no email in seed
+## React package
 
-Consumer or none → `person.phone` is `skipped`, `reason: "consumerEmail"`, immediately.
+`@usesonar/react` exports `SonarProvider`, `useSonar`, `useDeepSonar`, `SonarProviderProps`, and `SonarResult`. The provider accepts an Effect `Layer<SonarClient>` and owns one TanStack Query client and one Effect runtime, so consumers do not mount a separate `QueryClientProvider`.
 
-**Stage 1 — Identify.** Produces `person.linkedin` and `company.domain`. Cached on the seed, shared across tenants and across both routes. Emitted as the first field events. Branch on seed:
+Both hooks accept their tier configuration and return:
 
-- `linkedinUrl` → scrape profile → name, title, employer → employer domain.
-- `email` (corporate) → Exa on name + email domain → LinkedIn candidate → employer → company domain. The email domain is a hint, not truth: subsidiaries, agencies, legacy domains. Match with LinkedIn employer → high confidence. Mismatch → LinkedIn wins, email domain recorded in `sources`.
-- `email` (consumer) or `name` only → Exa on name. Low confidence, often `notFound`.
-- `xHandle` → X profile (bio, link, display name) → domain from link if present; LinkedIn via Exa on display name + bio.
-- `domain` only → company-only. All `person.*` `skipped`, `reason: "noPersonSeed"`.
+```ts
+type SonarResult<Data> = {
+  resolve(seed: SonarSeed): void
+  data: Data | null
+  status: "pending" | "complete" | undefined
+  loading: boolean
+  error: SonarClientError | null
+}
+```
 
-**Fail fast.** If identify yields neither `person.linkedin` nor `company.domain`, every dependent field is `notFound` with `reason: "identityFailed"` and `complete` fires. No retries with weaker signals. If one resolves, only fields gated on the other fail.
+Before `resolve`, data and error are `null`, status is `undefined`, and loading is false. The hooks use TanStack `experimental_streamedQuery`; identical canonical requests share one active query and completed result inside a provider. Cached results remain reusable for five minutes, separate providers remain isolated, and resolving a new key switches to the latest request and interrupts the superseded stream. Automatic retries and focus, reconnect, mount, and stale refetches are disabled.
 
-**Stage 2 — Fan-out.** Everything in the catalog runs in parallel once its gate is satisfied. Company fields gate on `company.domain`; person fields gate on `person.linkedin`; `person.phone` gates on both plus corporate email; research and deep keys gate on `company.domain` (and person identity when available, passed as context).
+## Eve package
 
-**Stage 3 — Settle.** Provider result → normalizer → field cache write → field event. Field confidence is capped at the confidence of the identity it depends on. Per-field timeout → `notFound`, `reason: "timeout"`. `complete` when all requested fields are terminal.
+`@usesonar/eve` exports only `researchSonar` and `deepResearchSonar`. Both factories produce Eve `0.45.1` tools whose schemas, descriptions, execution, and model projection derive from one validated config.
 
-Timeouts:
+Static tools keep TTL, selected fields, and questions under developer control, so model input contains only `SonarSeed`:
 
-| Provider                        | Budget                                                                                       |
-| ------------------------------- | -------------------------------------------------------------------------------------------- |
-| Identify                        | 10s                                                                                          |
-| Firecrawl, Exa                  | 30s                                                                                          |
-| Parallel (funding, research)    | 60s                                                                                          |
-| Browser agent (legalName)       | 5 min                                                                                        |
-| Sixtyfour (phone, deepResearch) | 10 min (their docs: P95 ~5 min, up to 10; use the async endpoint, don't hold a sync request) |
+```ts
+import { question } from "@usesonar/effect"
+import { researchSonar } from "@usesonar/eve"
 
-## Build
+type AccountSignals = {
+  intent: "low" | "medium" | "high"
+  evidence: string[]
+}
 
-**Stack:** Next.js on Vercel, Vercel Workflow (Workflow DevKit) for orchestration and streaming, Redis (Upstash via Vercel Marketplace) for every persistent store. No Postgres, no Convex.
+export default researchSonar({
+  ttl: "7d",
+  person: ["title"],
+  company: ["domain"],
+  research: {
+    accountSignals: question<AccountSignals>("Which buying signals are publicly visible?"),
+  },
+})
+```
 
-Next.js rather than a bare API framework because the dashboard (keys, origin allowlist), docs, and playground live in the same deploy. Route handlers serve `/v1/*`; pages serve the rest. Workflow is enabled with `withWorkflow` in `next.config`.
+`dynamic: true` keeps TTL under developer control but moves the person fields, company fields, and matching question map into model input. Dynamic input must still select at least one valid built-in or custom field.
 
-**Workflows.** One `"use workflow"` function per tier: `researchWorkflow` and `deepResearchWorkflow`. Inside each:
+Research and deep research run in the foreground by default and stream full progressive snapshots. Deep research can opt into Eve background semantics with `{ execution: "background" }`; that form drains the Effect stream and returns the final full snapshot normally. It does not create a delegated receipt, polling executor, or callback reconciliation path.
 
-- Stage 0 cache check is a step.
-- Identify is a step (cached on the seed; the step body first checks Redis and returns early on a hit).
-- Every provider call is its own step, so it is cached and retried independently. Use `RetryableError` for provider 5xx/timeouts and `FatalError` for validation failures.
-- Every field settling does two writes together: the field store in Redis, and `getWritable().write(fieldEvent)` to the run's stream. The stream serves live consumers; the store serves snapshots, `GET`, and the cross-tenant cache. Neither is read to produce the other.
-- Never call a workflow function directly; always `start()` from `workflow/api`.
+Eve runtime consumers receive the full snapshot. `toModelOutput` includes only resolved leaves as `{ value, confidence }`, preserves nested `person` and `company` fields plus top-level custom answers, and omits empty containers and unresolved fields. Static tools project only the factory's configured custom keys. Dynamic tools project every schema-valid, non-reserved top-level answer they receive; the upstream Effect protocol guarantees that those data keys came from the request. The projection ignores envelope and transport extras, including a raw envelope hash, and strips each field's `status`, `sources`, and `resolvedAt`. A validated custom answer named `provider`, `cache`, `jobId`, or `hash` remains answer data. Projection never mutates the full result.
 
-**Deep tier.** Sixtyfour has an async endpoint. The deep workflow calls it with a callback URL from `createWebhook()`, then awaits the webhook, which suspends the run at zero cost for up to the timeout, and resumes when Sixtyfour calls back. No polling. The browser agent for `legalName` follows the same pattern if it can call back; otherwise it is a step with a long timeout.
+Without an injected Layer, Eve reads `SONAR_BASE_URL` and `SONAR_SECRET_KEY` only when execution starts. Tests inject a Layer, so imports and factory creation never require credentials or make a network request.
 
-**Routes.**
+## Private backend
 
-`POST /v1/research` and `POST /v1/deepResearch`:
+`@usesonar/backend` is an Effect implementation seam, not a published package. Its production root exports the `SonarBackend` Context service, `layer`, and `createSonarHandler`. The `@usesonar/backend/testing` subpath provides fake capability tenants, scenarios, time, cache controls, settlement controls, probes, and cleanup around that same Fetch handler.
 
-1. Auth (key tier + origin check), validate body, compute `hash`.
-2. `SET hash runId NX` in Redis. If the key already existed, use the stored `runId`. If not, `start(workflow, input)` and store its `runId`. This makes the POST idempotent; two simultaneous first calls produce one run.
-3. `Accept: text/event-stream` → `getRun(runId).getReadable({ startIndex })` where `startIndex` comes from `Last-Event-ID` if present. Pipe to an SSE response, setting `id:` on each event to its stream index. If the run is already complete and its stream is no longer retained, replay from the field store instead and end with `complete`.
-4. `Accept: application/json` → read the snapshot from the field store, return `{ hash, status, data }`.
+The implemented backend is deliberately in-memory and deterministic. It proves validation, capability-derived tenancy, HMAC identity, idempotent runs, SSE replay, terminal gates, field-cache boundaries, safe errors, and Effect scope cleanup. It does not claim provider accuracy, Redis or workflow durability, hosted key management, or deployed origin enforcement.
 
-`GET /v1/{hash}`: look up `runId`, read the snapshot from the field store. Tenant-scoped by the hash. No workflow involvement.
+## Verification
 
-**Redis layout.** Everything is regenerable from upstream providers, so Redis with persistence is sufficient; losing it means re-resolving, not data loss.
+Required verification is offline and reproducible:
 
-| Key                                     | Value                                           | Notes                                                          |
-| --------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------- |
-| `run:{hash}`                            | `runId`                                         | `SET NX`; the idempotency lock                                 |
-| `Sonar:{hash}`                          | set of requested field paths + route            | lets `GET` know which fields to compose                        |
-| `identify:{normalizedSeed}`             | `{ personLinkedin, companyDomain, confidence }` | cross-tenant                                                   |
-| `company:{domain}:{fieldPath}`          | `Field<T>` JSON incl. `resolvedAt`              | cross-tenant                                                   |
-| `person:{linkedinUrl}:{fieldPath}`      | `Field<T>` JSON                                 | cross-tenant                                                   |
-| `research:{subject}:{sha256(question)}` | `Field<T>` JSON                                 | cross-tenant; `subject` is domain or linkedinUrl               |
-| `provider:{name}:{sha256(input)}`       | raw provider response                           | below the field layer; one Firecrawl scrape serves five fields |
-| `tenant:{id}`                           | key hashes, origin allowlist                    | dashboard-managed                                              |
+```sh
+bun test tests/stack.test.ts
+bun run typecheck
+just check
+just check-packages
+bun changeset status
+git diff --check
+```
 
-TTL is applied at read time against `resolvedAt`, not as a Redis expiry, because different requests carry different `ttl` values. Apply a generous Redis expiry (e.g. 180d) purely to bound memory.
+Each package's `VERIFY.md` defines its detailed verdict. The optional Eve live smoke test calls the OpenAI Responses API with `gpt-5.6-luna`, low reasoning effort, `store: false`, one attempt, and an injected deterministic Sonar Layer. It reports `UNAVAILABLE` without `OPENAI_API_KEY` and never affects the required verdict:
 
-**Snapshot composition.** `Sonar:{hash}` says which fields were requested; the handler reads each field's cache key, treats a missing key as `pending`, and assembles `data`. `status` is `complete` when no field is `pending`.
+```sh
+bun packages/eve/verify/live-responses.ts
+```
 
-**Verify early.** How long a completed run's stream stays readable. If retention is shorter than a plausible reconnect window, the store-replay fallback in step 3 must be solid rather than an edge case.
+## Deferred work
 
-## Billing
-
-Autumn (layer over Stripe) handles all billing. Credits are the unit; different fields cost different credits because upstream providers cost different amounts.
-
-- Autumn `check` before resolving any uncached field on a request; if the tenant has no balance, the request returns 402 with the fields it would have needed.
-- Autumn `track` once per field that actually hit a provider, with the field's credit cost. Cache hits are not tracked in v1 (open question below).
-- Per-field credit costs live in one table next to the catalog, keyed by field path (custom research/deepResearch keys have one cost per tier). Roughly pass-through provider cost with a margin; exact numbers TBD.
-- Autumn's `@useautumn/convex` component exists if Convex is the internal store; it removes webhook handling.
-
-Open: whether to charge for cache hits at all, and whether the eventual public pricing is credits-per-field or a flat per-call rate that abstracts the credits. Build the per-field metering either way; the pricing page can map onto it later.
-
-## Non-goals for v1
-
-- Webhooks
-- Server-registered schemas
-- Consumer phone lookup under any condition
-- Provider selection exposed to customers
-- Per-field default TTLs
-- Speculative Firecrawl on the email domain during identify
-- MCP server (planned: same config → `npx Sonar mcp` for non-eve agents)
-
-## Open items
-
-- Billing: cache-hit pricing and credits-per-field vs per-call (see Billing)
-- Freemail and disposable-domain list sources
-- Sixtyfour and Parallel prompt templates: how much resolved context to inject alongside the question
-- Dashboard: key issuance, origin allowlist
-- Rate limits
-
-## Reference links
-
-Read the actual docs before writing against any of these. Several publish `llms.txt` / `llms-full.txt` for agent consumption.
-
-**eve (agent tools)**
-
-- Docs index for agents: https://eve.dev/llms.txt and https://eve.dev/agents.md
-- Tools (defineTool, async-generator streaming, background execution, toModelOutput): https://eve.dev/docs/tools
-- Human-in-the-loop / approvals: https://eve.dev/docs/human-in-the-loop
-- Execution model and durability (step replay, idempotency): https://eve.dev/docs/concepts/execution-model-and-durability
-- Sessions, runs, streaming events (`action.partial`, `action.result`): https://eve.dev/docs/concepts/sessions-runs-and-streaming
-- Getting started / filesystem layout: https://eve.dev/docs/getting-started
-- Source: https://github.com/vercel/eve (full docs also ship in `node_modules/eve/docs`)
-
-**Sixtyfour (phone, deepResearch)**
-
-- Docs: https://docs.sixtyfour.ai
-- People intelligence / enrich-lead (sync and async): https://docs.sixtyfour.ai/api-reference/endpoint/enrich-lead
-- Tutorial notebooks: https://github.com/sixtyfour-ai/notebooks
-
-**Parallel (funding, research)**
-
-- Overview: https://docs.parallel.ai/getting-started/overview
-- Task API quickstart: https://docs.parallel.ai/task-api/task-quickstart
-- Task run lifecycle (async create/poll): https://docs.parallel.ai/task-api/guides/execute-task-run
-- Research basis (citations, confidence per field, maps onto our `sources`/`confidence`): https://docs.parallel.ai/task-api/guides/access-research-basis
-- Full docs for agents: https://docs.parallel.ai/llms-full.txt
-- TypeScript SDK: https://www.npmjs.com/package/parallel-web
-
-**Firecrawl (company brand fields)**
-
-- Scrape with `branding` format: https://docs.firecrawl.dev/features/scrape
-- Branding format v2 announcement (what the object contains): https://www.firecrawl.dev/blog/branding-format-v2
-- Cookbook using branding: https://docs.firecrawl.dev/developer-guides/cookbooks/brand-style-guide-generator-cookbook
-
-**Exa (identify, person fields)**
-
-- Search reference: https://docs.exa.ai/reference/search
-- Coding-agent guide: https://exa.ai/docs/reference/search-api-guide-for-coding-agents
-- Get contents / livecrawl: https://docs.exa.ai/reference/get-contents
-- Docs index for agents: https://exa.ai/llms.txt
-
-**Vercel Workflow (orchestration, streams)**
-
-- Docs: https://useworkflow.dev and https://vercel.com/docs/workflows
-- Streaming (getWritable, getReadable with startIndex, reconnection): https://useworkflow.dev/docs/foundations/streaming
-- Hooks and webhooks (createWebhook, resumeHook): see foundations/hooks in the docs
-- Client API (start, getRun): api-reference/workflow-api in the docs
-- Examples: https://github.com/vercel/workflow-examples
-- Announcement: https://vercel.com/blog/introducing-workflow
-
-**Autumn (billing)**
-
-- Welcome / model: https://docs.useautumn.com/docs/welcome
-- Credits guide: https://docs.useautumn.com/guides/credits
-- Source: https://github.com/useautumn/autumn
-- Convex component: https://www.convex.dev/components/autumn
+- Build the hosted application and route integration in `apps/next`.
+- Select and verify live enrichment providers.
+- Add durable storage and orchestration without changing the public contract.
+- Build capability issuance, origin management, rate limits, usage accounting, and billing.
+- Deploy the service behind the already-connected `usesonar.dev` Vercel domain and verify the live route.
+- Bootstrap and publish the four public npm packages.
