@@ -1,7 +1,7 @@
 {
   "name": "@usesonar/react",
   "version": "0.0.0",
-  "description": "Package scaffold for the future Sonar React integration.",
+  "description": "React hooks for streaming Sonar research.",
   "homepage": "https://github.com/usesonar/monorepo/tree/main/packages/react#readme",
   "bugs": {
     "url": "https://github.com/usesonar/monorepo/issues"
@@ -33,10 +33,23 @@
     "provenance": false
   },
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral",
+    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral --external react --external @tanstack/react-query --external effect --external @usesonar/effect --tsconfig ../../tsconfig.react.build.json",
     "prepack": "bun run build"
   },
+  "dependencies": {
+    "@tanstack/react-query": "5.102.6",
+    "@usesonar/effect": "0.0.0",
+    "effect": "4.0.0-rc.112"
+  },
+  "devDependencies": {
+    "@types/react": "19.2.18",
+    "@types/react-dom": "19.2.5",
+    "bun-types": "1.4.0",
+    "happy-dom": "20.11.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8"
+  },
   "peerDependencies": {
-    "react": "^19.2.8"
+    "react": "19.2.8"
   }
 }
