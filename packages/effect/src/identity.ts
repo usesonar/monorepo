@@ -1,0 +1,142 @@
+import type { JSONValue, SonarSeed } from "./model.js"
+
+type IdentityConfig = {
+  readonly ttl: string
+  readonly person: readonly string[]
+  readonly company: readonly string[]
+  readonly research?: object
+  readonly deepResearch?: object
+}
+
+type CanonicalRequest =
+  | { readonly tier: "research"; readonly config: IdentityConfig; readonly seed: SonarSeed }
+  | {
+      readonly tier: "deepResearch"
+      readonly config: IdentityConfig
+      readonly seed: SonarSeed
+    }
+
+type NormalizedSeed = {
+  linkedinURL?: string
+  fullName?: string
+  xURL?: string
+  email?: string
+  domain?: string
+  context?: JSONValue
+}
+
+const normalizedURL = (value: string, kind: "linkedin" | "x") => {
+  const url = new URL(value.trim())
+  url.hostname = url.hostname.toLowerCase()
+  url.hash = ""
+  url.search = ""
+  let path = url.pathname.replace(/\/+$/u, "")
+  if (kind === "x") {
+    path = path.replace(/^\/@/u, "/").toLowerCase()
+  }
+  url.pathname = path || "/"
+  return url.toString()
+}
+
+const isJSONObject = (value: JSONValue): value is { readonly [key: string]: JSONValue } =>
+  value !== null && !Array.isArray(value) && Object(value) === value
+
+const compareStrings = (left: string, right: string) => {
+  if (left < right) {
+    return -1
+  }
+  if (left > right) {
+    return 1
+  }
+  return 0
+}
+
+const normalizedJSON = (value: JSONValue): JSONValue => {
+  if (Array.isArray(value)) {
+    return value.map(normalizedJSON)
+  }
+  if (isJSONObject(value)) {
+    return Object.fromEntries(
+      Object.entries(value)
+        .toSorted(([left], [right]) => compareStrings(left, right))
+        .map(([key, nested]) => [key, normalizedJSON(nested)])
+    )
+  }
+  return value
+}
+
+const ttlMultiplier = (unit: string) => {
+  switch (unit) {
+    case "ms": {
+      return 1
+    }
+    case "s": {
+      return 1000
+    }
+    case "m": {
+      return 60_000
+    }
+    case "h": {
+      return 3_600_000
+    }
+    case "d": {
+      return 86_400_000
+    }
+    case "w": {
+      return 604_800_000
+    }
+    default: {
+      return null
+    }
+  }
+}
+
+const normalizedTTL = (value: string) => {
+  const match = /^(?<amount>\d+)(?<unit>ms|s|m|h|d|w)$/u.exec(value)
+  const amount = match?.groups?.amount
+  const unit = match?.groups?.unit
+  const multiplier = unit === undefined ? null : ttlMultiplier(unit)
+  return amount === undefined || multiplier === null ? value : Number(amount) * multiplier
+}
+
+const normalizedSeed = (seed: SonarSeed) => {
+  const normalized: NormalizedSeed = {}
+  if (seed.linkedinURL) {
+    normalized.linkedinURL = normalizedURL(seed.linkedinURL, "linkedin")
+  }
+  if (seed.fullName) {
+    normalized.fullName = seed.fullName.trim().toLowerCase()
+  }
+  if (seed.xURL) {
+    normalized.xURL = normalizedURL(seed.xURL, "x")
+  }
+  if (seed.email) {
+    normalized.email = seed.email.trim().toLowerCase()
+  }
+  if (seed.domain) {
+    normalized.domain = seed.domain.trim().toLowerCase()
+  }
+  if (seed.context) {
+    normalized.context = normalizedJSON(seed.context)
+  }
+  return normalized
+}
+
+const normalizedConfig = (config: IdentityConfig) => {
+  const questions = config.research ?? config.deepResearch ?? {}
+  return {
+    company: config.company.toSorted(),
+    person: config.person.toSorted(),
+    questions: Object.fromEntries(
+      Object.entries(questions).toSorted(([left], [right]) => compareStrings(left, right))
+    ),
+    ttl: normalizedTTL(config.ttl),
+  }
+}
+
+export const canonicalRequestIdentity = (request: CanonicalRequest) =>
+  JSON.stringify({
+    config: normalizedConfig(request.config),
+    seed: normalizedSeed(request.seed),
+    tier: request.tier,
+  })
