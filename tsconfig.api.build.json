@@ -1,3 +1,0 @@
-{
-  "extends": "./packages/api/tsconfig.json"
-}

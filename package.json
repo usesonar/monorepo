@@ -31,7 +31,7 @@
     "changeset:status": "changeset status",
     "fix": "ultracite fix",
     "release": "changeset publish",
-    "typecheck": "tsc -p scripts/tsconfig.json --pretty false && tsc -p packages/api/tsconfig.json --pretty false --composite false && tsc -p packages/effect/tsconfig.json --pretty false --composite false && tsc -p packages/backend/tsconfig.json --pretty false --composite false && tsc -p packages/react/tsconfig.json --pretty false --composite false && tsc -p packages/eve/tsconfig.json --pretty false --composite false && tsc -p apps/next/tsconfig.json --pretty false --composite false",
+    "typecheck": "tsc -p scripts/tsconfig.json --pretty false && tsc -p packages/api/tsconfig.json --pretty false && tsc -p packages/effect/tsconfig.json --pretty false && tsc -p packages/backend/tsconfig.json --pretty false && tsc -p packages/react/tsconfig.json --pretty false && tsc -p packages/eve/tsconfig.json --pretty false && tsc -p apps/next/tsconfig.json --pretty false",
     "test": "mise exec -- bun test --pass-with-no-tests",
     "version-packages": "changeset version"
   },

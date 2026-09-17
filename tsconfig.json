@@ -7,6 +7,7 @@
     "module": "Preserve",
     "moduleResolution": "bundler",
     "noEmit": true,
+    "skipLibCheck": true,
     "paths": {
       "@usesonar/api": ["./packages/api/src/index.ts"],
       "@usesonar/backend": ["./packages/backend/src/index.ts"],
@@ -16,14 +17,5 @@
       "@usesonar/eve": ["./packages/eve/src/index.ts"],
       "@usesonar/react": ["./packages/react/src/index.ts"]
     }
-  },
-  "files": [],
-  "references": [
-    { "path": "./packages/api" },
-    { "path": "./packages/effect" },
-    { "path": "./packages/backend" },
-    { "path": "./packages/react" },
-    { "path": "./packages/eve" },
-    { "path": "./apps/next" }
-  ]
+  }
 }

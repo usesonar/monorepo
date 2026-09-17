@@ -1,12 +1,7 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "allowImportingTsExtensions": true,
-    "composite": true,
-    "resolveJsonModule": true,
-    "skipLibCheck": true,
     "types": ["bun-types"]
   },
-  "files": ["package.json"],
   "include": ["src/**/*.ts"]
 }

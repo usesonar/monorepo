@@ -1,12 +1,8 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": {
-    "composite": true,
     "jsx": "react-jsx",
-    "resolveJsonModule": true,
-    "skipLibCheck": true,
     "types": ["bun-types/test"]
   },
-  "files": ["package.json"],
   "include": ["src/**/*.ts", "src/**/*.tsx", "test/**/*.ts"]
 }

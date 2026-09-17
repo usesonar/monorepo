@@ -33,7 +33,7 @@
     "provenance": false
   },
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral --external eve --external effect --external @usesonar/effect --tsconfig ../../tsconfig.eve.build.json",
+    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral --external eve --external effect --external @usesonar/effect --tsconfig ../../tsconfig.build.json",
     "prepack": "bun run build"
   },
   "dependencies": {

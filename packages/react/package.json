@@ -33,7 +33,7 @@
     "provenance": false
   },
   "scripts": {
-    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral --external react --external @tanstack/react-query --external effect --external @usesonar/effect --tsconfig ../../tsconfig.react.build.json",
+    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral --external react --external @tanstack/react-query --external effect --external @usesonar/effect --tsconfig ../../tsconfig.build.json",
     "prepack": "bun run build"
   },
   "dependencies": {
