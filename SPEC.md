@@ -1,8 +1,8 @@
-# Sonar product contract (v3)
+# Sonar product contract (v4)
 
 Sonar turns a thin identity seed and a requested schema into progressive person and company data. This version defines one observable contract across the raw API, Effect, React, Eve, and the private backend.
 
-The repository implements the package foundation and a deterministic in-memory backend. A hosted service, provider integrations, durable storage, billing, and the `apps/next` product remain outside this scope.
+The repository implements the package foundation, a deterministic in-memory backend, and private provider adapters. A hosted service, durable storage, billing, and the `apps/next` product remain outside this scope.
 
 ## Surfaces and dependency direction
 
@@ -44,42 +44,63 @@ Supported identity fields can coexist, so a LinkedIn seed can also carry a name,
 
 Person fields appear before company fields on every surface.
 
-| Tier | Person fields | Company fields | Custom question map |
+| Tier | Person fields | Company fields | Entity question map |
 | --- | --- | --- | --- |
 | Research | `linkedin`, `title`, `x`, `github` | `domain`, `name`, `logo`, `colors`, `location`, `description`, `funding` | `research` |
 | Deep research | `phone` | `legalName` | `deepResearch` |
 
-A request cannot use a field from the other tier, and each built-in selection must be unique. Custom keys must be lower-camel identifiers, questions must be non-empty strings, and `ttl`, `person`, `company`, `research`, and `deepResearch` are reserved.
+A request cannot use a field from the other tier. Built-ins use literal `true` selectors. Custom keys must be lower-camel identifiers, and `ttl`, `person`, `company`, `research`, and `deepResearch` are reserved.
 
-### Flat request shape
+### Entity-owned request shape
 
-The request keeps its tier-specific question map and does not wrap configuration in another object:
+Each question map sits beside the built-in selectors for the entity it describes. Research accepts authored validators and compiles them to serializable JSON Schema before transport. Deep research accepts nonblank prompt strings:
 
 ```ts
-type ResearchRequest = {
+type ResearchInput = {
   seed: SonarSeed
   ttl: TTL
-  person: readonly ResearchPersonField[]
-  company: readonly ResearchCompanyField[]
-  research: Readonly<Record<string, string>>
+  person: {
+    linkedin?: true
+    title?: true
+    x?: true
+    github?: true
+    research?: Readonly<Record<string, ResearchQuestion>>
+  }
+  company: {
+    domain?: true
+    name?: true
+    logo?: true
+    colors?: true
+    location?: true
+    description?: true
+    funding?: true
+    research?: Readonly<Record<string, ResearchQuestion>>
+  }
 }
 
 type DeepResearchRequest = {
   seed: SonarSeed
   ttl: TTL
-  person: readonly DeepResearchPersonField[]
-  company: readonly DeepResearchCompanyField[]
-  deepResearch: Readonly<Record<string, string>>
+  person: {
+    phone?: true
+    deepResearch?: Readonly<Record<string, string>>
+  }
+  company: {
+    legalName?: true
+    deepResearch?: Readonly<Record<string, string>>
+  }
 }
 ```
 
-### Typed questions
+### Research validators
 
-`@usesonar/api` owns `question<Answer>(prompt)`, and `@usesonar/effect` re-exports it for Effect, React, and Eve consumers. The helper returns the same prompt string with compile-time answer metadata, so a configured `accountSignals: question<AccountSignals>("...")` produces a top-level `Field<AccountSignals>`. A plain string or `question(prompt)` produces `Field<JSONValue>`. Selected built-ins retain their exact catalog types, and unselected built-ins remain absent. The brand declares the caller's expected TypeScript type; runtime custom answers are JSON-validated rather than structurally checked against that type.
+A research question can be a bare Zod 4 schema, a raw JSON Schema object, or a validator that explicitly implements `StandardJSONSchemaV1`. It cannot be an arbitrary `StandardSchemaV1` validator. The root JSON Schema `description` is the nonblank research prompt. A Zod schema supplies it through `.describe()`, while raw and Standard JSON Schema values supply it directly.
 
-API create operations, Effect operations, React hooks, and static Eve factories derive answer types from their question map; they do not accept a separate operation-level answer map. Literal configs, spreads of literal configs, and `satisfies` preserve question brands and exact field selection. Finite question maps declared as interfaces or type aliases produce exact required fields. A broad annotation such as `ResearchConfig` or `Record<string, string>` erases question brands and exposes arbitrary custom reads as `Field<JSONValue> | undefined`; broad selection arrays similarly make catalog reads optional while preserving each catalog value type. Union, optional-keyed, callable, constructable, and numeric or symbol key hybrid maps are rejected.
+`compileResearchRequest(input)` calls the output JSON Schema converter with draft 2020-12, validates the result as JSON, requires a nonblank root description, and returns the serializable `ResearchRequest` wire value. `createResearch` and `streamResearch` compile automatically before HTTP. A typed validator produces `Field<Output>` when its output extends `JSONValue`; a raw schema produces `Field<JSONValue>`. Deep-research answers are `Field<string>`.
 
-Raw `retrieveSonar(client, hash)` has no config from which to derive custom keys, so its default type does not claim any. `retrieveSonar<Answers>(client, hash)` is the one safe explicit map for callers that already know those keys. Dynamic Eve is the other exception because the model owns the question map at execution time; its type-only explicit map adds optional possible fields without requesting those keys or runtime-validating their answer shapes. Both explicit maps require finite, non-union interfaces or type aliases with required lower-camel keys. They reject callable or constructable maps and numeric or symbol key hybrids. Without an explicit dynamic map, Eve exposes optional built-in catalogs but does not invent custom names.
+API create operations, Effect operations, React hooks, and static Eve factories derive answer types from their entity-owned question maps; they do not accept a separate operation-level answer map. Literal configs, spreads of literal configs, and `satisfies ResearchInput` preserve exact validator outputs and field selection. Finite question maps declared as interfaces or type aliases produce exact required fields. Broad configs expose catalog and arbitrary-answer reads as optional while preserving value types. Union, optional-keyed, callable, constructable, and numeric or symbol key hybrid maps are rejected.
+
+Raw `retrieveSonar(client, hash)` has no config from which to derive custom keys, so its default type does not claim any. `retrieveSonar<Answers>(client, hash)` accepts one explicit entity-and-tier-nested map for callers that already know those keys. Dynamic Eve is the other exception because the model owns its question map at execution time. Both explicit maps require finite, non-union interfaces or type aliases with required lower-camel keys. They reject callable or constructable maps and numeric or symbol key hybrids. Without an explicit map, these surfaces expose optional built-in catalogs but do not invent custom names.
 
 ## Shared result contract
 
@@ -107,7 +128,7 @@ type Field<T = JSONValue> =
 
 The first snapshot contains every requested leaf as `pending`. A leaf then settles once to `resolved`, `notFound`, or `skipped`. The snapshot remains `pending` through field settlement and becomes `complete` only after an explicit completion event verifies that no field remains pending.
 
-Built-in fields stay nested, while custom answers become top-level fields after `person` and `company`:
+Built-in fields stay directly under their entity, while custom answers retain their entity and tier namespaces:
 
 ```ts
 type SonarSnapshot = {
@@ -115,14 +136,13 @@ type SonarSnapshot = {
   data: {
     person: Record<string, Field>
     company: Record<string, Field>
-    [customAnswer: string]: Field | Record<string, Field>
   }
 }
 
 type SonarResponse = SonarSnapshot & { hash: string }
 ```
 
-For a request with `research: { accountSignals: "..." }`, the result is `data.accountSignals`, not `data.research.accountSignals`. Only the raw HTTP/API response can expose `hash`; Effect, React, and Eve return `SonarSnapshot` without it.
+For `person: { research: { accountSignals: schema } }`, the result is `data.person.research.accountSignals`. The same key can coexist under another entity or tier because its full path is distinct. Only the raw HTTP/API response can expose `hash`; Effect, React, and Eve return `SonarSnapshot` without it.
 
 ## HTTP and SSE protocol
 
@@ -159,7 +179,7 @@ The backend computes run identity as:
 HMAC-SHA256(serverSecret, tenantId + route + canonicalSeed + canonicalConfig)
 ```
 
-Canonicalization normalizes seed strings and URLs, recursively orders JSON object keys, orders selected fields, and includes the tier-specific questions and TTL. Changing the tenant, route, or TTL changes the hash. Equivalent property order, field order, casing, and surrounding whitespace normalize to the same request identity where the seed rules permit it.
+Canonicalization normalizes seed strings and URLs, recursively orders JSON object keys, and includes the entity-owned built-in selectors, compiled question schemas, and TTL. Changing the tenant, route, or TTL changes the hash. Equivalent property order, field order, casing, and surrounding whitespace normalize to the same request identity where the seed rules permit it.
 
 The hash is tenant-derived and unguessable without the server secret. Possessing another tenant's hash does not grant access, and cross-tenant reads are indistinguishable from unknown hashes.
 
@@ -171,11 +191,15 @@ Fields cache independently:
 - A `skipped` field is never cached.
 - Positive freshness uses the field's `resolvedAt`, not its cache-write time.
 
+## Research provider routing
+
+Entity-owned `research` maps execute through Parallel's `core-fast` processor. Entity-owned `deepResearch` maps execute through SixtyFour at `medium` depth. Provider names, processor names, upstream jobs, and provider-native confidence values remain private backend details; the public contract exposes only normalized fields, sources, and Sonar confidence.
+
 ## Raw API package
 
 `@usesonar/api` owns the Zod schemas and transport. `createSonar(options)` requires an absolute `baseURL` and exactly one non-empty `publishableKey` or `secretKey`, then returns the actual `KyInstance`. Callers retain Ky headers, hooks, retry, timeout, custom `fetch`, and `.extend()` behavior; Sonar sets the bearer authorization header from the selected capability.
 
-The JSON helpers are `createResearch`, `createDeepResearch`, and `retrieveSonar`. The stream helpers are `streamResearch` and `streamDeepResearch`. All helpers validate untrusted protocol data. HTTP failures retain Ky error behavior, schema failures retain Zod behavior, and SSE framing or protocol failures use `SonarStreamError`.
+The JSON helpers are `createResearch`, `createDeepResearch`, and `retrieveSonar`. The stream helpers are `streamResearch` and `streamDeepResearch`. `compileResearchRequest` is the shared authored-to-wire compiler used by both research transports. All helpers validate untrusted protocol data. HTTP failures retain Ky error behavior, schema failures retain Zod behavior, and SSE framing or protocol failures use `SonarStreamError`.
 
 ## Effect package
 
@@ -220,8 +244,8 @@ Before `resolve`, data and error are `null`, status is `undefined`, and loading 
 Static tools keep TTL, selected fields, and questions under developer control, so model input contains only `SonarSeed`:
 
 ```ts
-import { question } from "@usesonar/effect"
 import { researchSonar } from "@usesonar/eve"
+import { z } from "zod"
 
 type AccountSignals = {
   intent: "low" | "medium" | "high"
@@ -230,11 +254,18 @@ type AccountSignals = {
 
 export default researchSonar({
   ttl: "7d",
-  person: ["title"],
-  company: ["domain"],
-  research: {
-    accountSignals: question<AccountSignals>("Which buying signals are publicly visible?"),
+  person: {
+    title: true,
+    research: {
+      accountSignals: z
+        .object({
+          intent: z.enum(["low", "medium", "high"]),
+          evidence: z.array(z.string()),
+        })
+        .describe("Which buying signals are publicly visible?"),
+    },
   },
+  company: { domain: true },
 })
 ```
 
@@ -242,7 +273,7 @@ export default researchSonar({
 
 Research and deep research run in the foreground by default and stream full progressive snapshots. Deep research can opt into Eve background semantics with `{ execution: "background" }`; that form drains the Effect stream and returns the final full snapshot normally. It does not create a delegated receipt, polling executor, or callback reconciliation path.
 
-Eve runtime consumers receive the full snapshot. `toModelOutput` includes only resolved leaves as `{ value, confidence }`, preserves nested `person` and `company` fields plus top-level custom answers, and omits empty containers and unresolved fields. Static tools project only the factory's configured custom keys. Dynamic tools project every schema-valid, non-reserved top-level answer they receive; the upstream Effect protocol guarantees that those data keys came from the request. The projection ignores envelope and transport extras, including a raw envelope hash, and strips each field's `status`, `sources`, and `resolvedAt`. A validated custom answer named `provider`, `cache`, `jobId`, or `hash` remains answer data. Projection never mutates the full result.
+Eve runtime consumers receive the full snapshot. `toModelOutput` includes only resolved leaves as `{ value, confidence }`, preserves the entity and tier namespaces, and omits empty containers and unresolved fields. Static tools project only the factory's configured custom keys. Dynamic tools project every schema-valid answer they receive under its entity and tier; the upstream Effect protocol guarantees that those data paths came from the request. The projection ignores envelope and transport extras, including a raw envelope hash, and strips each field's `status`, `sources`, and `resolvedAt`. A validated custom answer named `provider`, `cache`, `jobId`, or `hash` remains answer data. Projection never mutates the full result.
 
 Without an injected Layer, Eve reads `SONAR_BASE_URL` and `SONAR_SECRET_KEY` only when execution starts. Tests inject a Layer, so imports and factory creation never require credentials or make a network request.
 
@@ -274,7 +305,7 @@ bun packages/eve/verify/live-responses.ts
 ## Deferred work
 
 - Build the hosted application and route integration in `apps/next`.
-- Select and verify live enrichment providers.
+- Verify provider adapters against live provider accounts before deployment.
 - Add durable storage and orchestration without changing the public contract.
 - Build capability issuance, origin management, rate limits, usage accounting, and billing.
 - Deploy the service behind the already-connected `usesonar.dev` Vercel domain and verify the live route.

@@ -18,7 +18,7 @@ The selected architecture is fixed for this goal:
 
 The seed union accepts branches `linkedinURL`, `fullName + xURL`, or `fullName + email`; supported identity fields may coexist; optional `domain` or JSON `context` may accompany a valid branch; neither alone satisfies it; TTL is inclusive from 12 hours through 365 days. The API stream begins with a pending snapshot, emits field events, completes once, and permits three reconnects. Hash identity is an HMAC over the server secret, authenticated tenant ID, route, and canonical seed/config including TTL. Publishable and secret capabilities are distinct, and required tests use deterministic fixture keys only.
 
-The golden research request uses the two-field seed branch `fullName + xURL`, `ttl: "12h"`, one person field, one company field, and one custom research question. Request configuration retains the `research` question map. Result data lists `person`, then `company`, then the custom answer at the top level; there is no nested `data.research` result slot. Custom values are JSON values at runtime and carry compile-time types through literal `question<Answer>(prompt)` values. Finite interfaces and finite type aliases produce exact required fields; `Readonly<Record<string, string>>` question annotations and broad catalog arrays remain accepted but produce optional reads. Callable or constructable maps and numeric or symbol key hybrids fail at compile time. Raw retrieval and model-owned dynamic Eve questions use their documented finite-map exceptions.
+The golden research request uses the two-field seed branch `fullName + xURL`, `ttl: "12h"`, one built-in field and one described research schema under each entity. Result data lists `person` then `company`; each entity keeps its custom answers under `research`. Research authors may supply a Zod validator, raw JSON Schema, or `StandardJSONSchemaV1`, and the compiled wire schema's nonblank root description is the prompt. Deep research uses prompt strings and keeps answers under each entity's `deepResearch` namespace. Finite interfaces and finite type aliases produce exact required fields, while broad configs preserve catalog types but make reads optional. Callable or constructable maps and numeric or symbol key hybrids fail at compile time. Raw retrieval and model-owned dynamic Eve questions use their documented finite-map exceptions.
 
 ## Required conditions
 
@@ -26,19 +26,19 @@ Each ID is required. `tests/stack.test.ts` is the executable evidence for the ru
 
 ### STK-001 — One wire contract across the stack
 
-The same canonical request is accepted by the private Fetch handler, raw API JSON helper, and Effect client; React and Eve receive its config and seed through their designed split call boundary. Every representation has the same ordered result keys (`person`, `company`, custom answer), keeps the research question map in the request, and flattens only the custom answer key in result data. Every requested leaf begins as `{ status: "pending" }` and settles to a terminal field before `status: "complete"`.
+The same canonical request is accepted by the private Fetch handler, raw API JSON helper, and Effect client; React and Eve receive its config and seed through their designed split call boundary. Every representation has the same ordered root keys (`person`, `company`) and retains each question and answer under its owning entity and tier. The verifier also sends one deep-research prompt under each entity through the raw API and Effect client. Every requested leaf begins as `{ status: "pending" }` and settles to a terminal field before `status: "complete"`.
 
-FAIL if any surface nests custom results under `research`, drops a requested leaf, invents a fifth field state, accepts a different seed/config, or reports complete while a leaf is pending.
+FAIL if any surface flattens or moves an entity-owned custom result, drops a requested leaf, invents a fifth field state, accepts a different seed/config, or reports complete while a leaf is pending.
 
 ### STK-002 — Backend Fetch handler to raw API
 
-The test harness accepts deterministic capability keys and an in-memory handler. `createSonar` uses the injected handler as its only transport; `createResearch` sends the exact `/v1/research` JSON request, and `retrieveSonar` reads the same completed snapshot. The public raw JSON may contain the HMAC hash, but its body contains no provider, job, cache, run, Layer, workflow, or secret details.
+The test harness accepts deterministic capability keys and an in-memory handler. `createSonar` uses the injected handler as its only transport; `createResearch` sends the exact compiled `/v1/research` JSON request, `createDeepResearch` sends the exact `/v1/deepResearch` prompt request, and `retrieveSonar` reads the same completed research snapshot. The public raw JSON may contain the HMAC hash, but its body contains no provider, processor, job, cache, run, Layer, workflow, or secret details.
 
 FAIL if the raw API silently uses ambient `fetch`, changes the request body, loses custom-question configuration, returns a different snapshot from the handler, or leaks transport/backend internals.
 
 ### STK-003 — API SSE to Effect Stream
 
-The same raw Ky instance feeds `layerFromAPI`. Its Effect `SonarClient` research stream receives the initial all-pending snapshot, applies indexed field events in order, ignores no terminal field, and exposes the completed snapshot with the same data shape as raw API retrieval. The raw Fetch stream must expose snapshot ID `0`, then field IDs `1`, `2`, `3` for `person.title`, `company.name`, and `sellsToSMB`, then complete ID `4`. The verifier deliberately disconnects after ID `1`, reconnects with `Last-Event-ID: 1`, and proves the resumed sequence has no duplicate, gap, or changed path. The backend records the same in-memory run for equivalent JSON and SSE POSTs, and a disconnect does not cancel it.
+The same raw Ky instance feeds `layerFromAPI`. Its Effect `SonarClient` research stream receives the initial all-pending snapshot, applies indexed field events in order, ignores no terminal field, and exposes the completed snapshot with the same data shape as raw API retrieval. The raw Fetch stream exposes snapshot ID `0`, field IDs `1` through `4` for `person.title`, `person.research.isTechnical`, `company.name`, and `company.research.sellsToSMB`, then complete ID `5`. The verifier deliberately disconnects after ID `1`, reconnects with `Last-Event-ID: 1`, and proves the resumed sequence has no duplicate, gap, or changed path. The Effect deep-research stream independently proves nested person and company answers. The backend records one in-memory run for equivalent JSON and SSE POSTs, and a disconnect does not cancel it.
 
 FAIL if Effect sees an API-specific envelope, misses an event, receives a hash or provider detail in its snapshot, starts duplicate work, or turns a client disconnect into run cancellation.
 
@@ -46,7 +46,7 @@ FAIL if Effect sees an API-specific envelope, misses an event, receives a hash o
 
 With the same `layerFromAPI` and deterministic handler, `SonarProvider` and `useSonar` produce an idle result, then the all-pending snapshot, then the same complete data tree as Effect and raw retrieval. React shares an identical request inside one provider and never exposes the raw hash, capability key, question transport, provider, cache, or run metadata. The test mounts a real React tree in the test-only in-memory DOM helper; it does not replace hooks with a copied reducer.
 
-FAIL if the hook requires a separately mounted `QueryClientProvider`, nests custom data under `research`, uses a different request identity, refetches the same key, or exposes raw API/backend metadata.
+FAIL if the hook requires a separately mounted `QueryClientProvider`, flattens an entity-owned custom answer, uses a different request identity, refetches the same key, or exposes raw API/backend metadata.
 
 ### STK-005 — Eve adapter semantics
 
@@ -68,13 +68,13 @@ FAIL if a public manifest or source bypasses a public package export, makes back
 
 ### STK-008 — Workspace and release coverage
 
-Root TypeScript references, build/check scripts, CI package checks, and release enumerations include every published API, Effect, React, and Eve package. Each published package has its own release metadata and per-package changeset coverage; the private backend is never published. Runtime and development dependencies are inspected separately so a forbidden backend edge cannot hide in the dev graph. Generated `dist` output for API, Effect, React, and Eve is not tracked, and tests contain no disabled cases.
+The root build TypeScript config, build/check scripts, CI package checks, and release enumerations include every published API, Effect, React, and Eve package. Each published package has its own release metadata and per-package changeset coverage; the private backend is never published. Runtime and development dependencies are inspected separately so a forbidden backend edge cannot hide in the dev graph. Generated `dist` output for API, Effect, React, and Eve is not tracked, and tests contain no disabled cases.
 
 FAIL if any public package is omitted from a root enumeration, a changeset cannot account for a user-visible package, backend appears in a publish loop, or generated output/disabled test markers are used as proof.
 
 ### STK-009 — Required verification is offline and reproducible
 
-The focused stack test passes with global `fetch` poisoned and provider, model, Vercel, and Sonar environment variables poisoned, so only injected in-memory transport and deterministic fake keys can be used. Settlement and reconnect assertions use backend promises and controls, never sleeps or timer polling. Repeating the deterministic golden fingerprint helper in two fresh processes produces the same canonical identity; the runtime path separately proves the same snapshots, event order, hashes for the same tenant/config, and adapter projections.
+The focused stack test passes with global `fetch` poisoned and Firecrawl, Parallel, SixtyFour, model, Vercel, and Sonar environment variables poisoned, so only injected in-memory transport and deterministic fake keys can be used. Settlement and reconnect assertions use backend promises and controls, never sleeps or timer polling. Repeating the deterministic golden fingerprint helper in two fresh processes produces the same canonical identity; the runtime path separately proves the same snapshots, event order, hashes for the same tenant/config, and adapter projections.
 
 FAIL if the test depends on ambient network/environment state, logs a secret, uses `Bun.sleep`, `setTimeout`, or timer polling instead of harness controls, recursively invokes the test suite as its reproducibility probe, or cannot be rerun without external services.
 

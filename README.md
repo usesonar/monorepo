@@ -42,28 +42,38 @@ That smoke test uses `gpt-5.6-luna` with low reasoning effort and never gates CI
 
 ## Contract at a glance
 
-Research requests are flat and keep custom questions in the request:
+Research and deep research use separate requests. Each request keeps built-in fields and custom questions under the person or company they describe:
 
 ```ts
-import { question } from "@usesonar/api"
+import { z } from "zod"
 
-type AccountSignals = {
-  intent: "low" | "medium" | "high"
-  evidence: string[]
-}
+const AccountSignals = z.object({
+  intent: z.enum(["low", "medium", "high"]),
+  evidence: z.array(z.string()),
+})
+type AccountSignals = z.infer<typeof AccountSignals>
 
 const request = {
   seed: { fullName: "Ada Lovelace", email: "ada@example.com" },
   ttl: "7d",
-  person: ["title"],
-  company: ["domain"],
-  research: {
-    accountSignals: question<AccountSignals>("Which buying signals are publicly visible?"),
+  person: {
+    linkedin: true,
+    title: true,
+  },
+  company: {
+    domain: true,
+    research: {
+      accountSignals: AccountSignals.describe("Which buying signals are publicly visible?"),
+    },
   },
 } as const
 ```
 
-The branded prompt makes `data.accountSignals` a `Field<AccountSignals>`. A plain prompt string produces `Field<JSONValue>`, while selected built-ins retain their catalog types. Finite interfaces and finite type aliases produce exact required fields. Question maps annotated as `Readonly<Record<string, string>>` remain accepted, but arbitrary custom reads are `Field<JSONValue> | undefined`; broad catalog arrays also make catalog reads optional. Callable or constructable maps and numeric or symbol key hybrids are rejected. Built-in results stay under `person` and `company`, while custom answers become top-level fields in `data`. Every requested field progresses from `pending` to `resolved`, `notFound`, or `skipped`; the snapshot becomes `complete` only after every field is terminal.
+Research questions accept Zod 4 schemas, raw JSON Schema with a root `description`, or another `StandardJSONSchemaV1` validator. Sonar compiles the validator to wire JSON Schema, and its output determines the field type. In this example, the answer is `data.company.research.accountSignals`, a `Field<AccountSignals>`.
+
+Deep-research questions use plain prompt strings under `person.deepResearch` or `company.deepResearch`, and their answers remain under the same path as `Field<string>`. Finite interfaces and type aliases preserve exact required fields, while broad entity and question maps make reads optional without losing their known value types. Every requested leaf progresses from `pending` to `resolved`, `notFound`, or `skipped`; the snapshot becomes `complete` only after every leaf is terminal.
+
+The private backend sends research questions to Parallel `core-fast` and deep-research questions to SixtyFour `medium`. Firecrawl handles only the company-site fields `name`, `logo`, `colors`, and `description`. Provider details never appear in public responses.
 
 ## Releases
 
