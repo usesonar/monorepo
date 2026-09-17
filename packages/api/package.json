@@ -1,0 +1,47 @@
+{
+  "name": "@usesonar/api",
+  "version": "0.0.0",
+  "description": "Typed Ky client and wire contracts for the Sonar API.",
+  "homepage": "https://github.com/usesonar/monorepo/tree/main/packages/api#readme",
+  "bugs": {
+    "url": "https://github.com/usesonar/monorepo/issues"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/usesonar/monorepo.git",
+    "directory": "packages/api"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": false
+  },
+  "scripts": {
+    "build": "tsdown src/index.ts --format esm --dts --clean --platform neutral --tsconfig ../../tsconfig.build.json",
+    "prepack": "bun run build"
+  },
+  "dependencies": {
+    "eventsource-parser": "4.1.0",
+    "ky": "2.0.2",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "bun-types": "1.4.0"
+  }
+}

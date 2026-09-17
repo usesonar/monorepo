@@ -1,0 +1,14 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "jsx": "react-jsx"
+  },
+  "include": [
+    "packages/api/src/**/*.ts",
+    "packages/effect/src/**/*.ts",
+    "packages/react/src/**/*.ts",
+    "packages/react/src/**/*.tsx",
+    "packages/eve/src/**/*.ts"
+  ],
+  "exclude": ["**/*.test.ts"]
+}

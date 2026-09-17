@@ -1,30 +1,57 @@
 {
   "name": "@usesonar/monorepo",
+  "version": "1.0.0",
   "private": true,
+  "description": "Sonar turns a thin identity seed into progressive person and company data. The workspace implements one contract across a raw Ky client, an Effect client, React hooks, Eve tools, and a private in-memory backend.",
+  "keywords": [],
+  "homepage": "https://github.com/usesonar/monorepo#readme",
+  "bugs": {
+    "url": "https://github.com/usesonar/monorepo/issues"
+  },
+  "license": "ISC",
+  "author": "Cyrus Nouroozi",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/usesonar/monorepo.git"
+  },
+  "directories": {
+    "test": "tests"
+  },
   "workspaces": [
     "apps/*",
     "packages/*"
   ],
   "type": "module",
+  "main": "index.js",
   "scripts": {
-    "build": "bun run --filter '@usesonar/eve' build && bun run --filter '@usesonar/react' build",
+    "build": "mise exec -- bun run --filter '@usesonar/api' build && mise exec -- bun run --filter '@usesonar/effect' build && mise exec -- bun run --cwd packages/backend --if-present build && mise exec -- bun run --filter '@usesonar/react' build && mise exec -- bun run --filter '@usesonar/eve' build && sidecars=\"$(git ls-files --others --exclude-standard 'packages/*/src/*.d.ts')\" && test -z \"$sidecars\"",
     "check": "ultracite check",
-    "check:packages": "publint packages/eve && publint packages/react && attw --pack packages/eve --profile esm-only && attw --pack packages/react --profile esm-only",
+    "check:packages": "publint node_modules/@usesonar/api && publint node_modules/@usesonar/effect && publint node_modules/@usesonar/react && publint node_modules/@usesonar/eve && attw --pack node_modules/@usesonar/api --profile esm-only && attw --pack node_modules/@usesonar/effect --profile esm-only && attw --pack node_modules/@usesonar/react --profile esm-only && attw --pack node_modules/@usesonar/eve --profile esm-only",
     "changeset": "changeset",
     "changeset:status": "changeset status",
     "fix": "ultracite fix",
     "release": "changeset publish",
-    "typecheck": "tsc -b --pretty false",
-    "test": "bun test --pass-with-no-tests",
+    "typecheck": "tsc -p scripts/tsconfig.json --pretty false && tsc -p packages/api/tsconfig.json --pretty false && tsc -p packages/effect/tsconfig.json --pretty false && tsc -p packages/backend/tsconfig.json --pretty false && tsc -p packages/react/tsconfig.json --pretty false && tsc -p packages/eve/tsconfig.json --pretty false && tsc -p apps/next/tsconfig.json --pretty false",
+    "test": "mise exec -- bun test --pass-with-no-tests",
     "version-packages": "changeset version"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "0.18.5",
     "@changesets/changelog-github": "1.0.0",
     "@changesets/cli": "3.0.1",
+    "@usesonar/api": "workspace:*",
+    "@usesonar/backend": "workspace:*",
+    "@usesonar/effect": "workspace:*",
+    "@usesonar/eve": "workspace:*",
+    "@usesonar/react": "workspace:*",
+    "bun-types": "1.4.0",
+    "effect": "4.0.0-rc.112",
+    "happy-dom": "20.11.6",
     "oxfmt": "0.63.0",
     "oxlint": "1.78.0",
     "publint": "0.3.24",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "tsdown": "0.22.14",
     "typescript": "7.0.2",
     "ultracite": "7.10.4"
