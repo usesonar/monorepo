@@ -9,7 +9,10 @@
   "dependencies": {
     "@usesonar/api": "workspace:*",
     "@usesonar/effect": "workspace:*",
-    "effect": "4.0.0-rc.112"
+    "effect": "4.0.0-rc.112",
+    "firecrawl": "4.37.0",
+    "ky": "2.0.2",
+    "parallel-web": "1.3.2"
   },
   "devDependencies": {
     "bun-types": "1.4.0"

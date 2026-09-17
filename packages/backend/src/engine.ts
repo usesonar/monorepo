@@ -11,10 +11,14 @@ import type {
   DeepResearchRequest,
   Field,
   JSONValue,
+  ResearchJSONSchema,
   ResearchRequest,
   SonarSeed,
   SonarSnapshot,
 } from "@usesonar/api"
+
+import { ProviderFailure } from "./providers.ts"
+import type { CompanySiteField, ProviderAnswer, ProviderRunner } from "./providers.ts"
 
 export type TestTenant = {
   readonly key: string
@@ -39,6 +43,7 @@ export type FakeFieldInput = {
 }
 
 export type EngineOptions = {
+  readonly providerRunner?: ProviderRunner
   readonly serverSecret: string
   readonly tenants: readonly TestTenant[]
   readonly scenario?: FakeScenario
@@ -47,6 +52,17 @@ export type EngineOptions = {
 type ParsedRequest = ResearchRequest | DeepResearchRequest
 type Route = "/v1/research" | "/v1/deepResearch"
 type TerminalField = Exclude<Field, { status: "pending" }>
+type CustomNamespaces = {
+  readonly research?: Readonly<Record<string, Field>>
+  readonly deepResearch?: Readonly<Record<string, Field<string>>>
+}
+type BackendSnapshot = {
+  readonly status: SonarSnapshot["status"]
+  readonly data: {
+    readonly person: SonarSnapshot["data"]["person"] & CustomNamespaces
+    readonly company: SonarSnapshot["data"]["company"] & CustomNamespaces
+  }
+}
 type CacheScope = "builtIn" | "custom"
 type IdentityStatus = "pending" | "resolved" | "notFound"
 
@@ -56,8 +72,36 @@ type WireEvent = {
   readonly data: JSONValue
 }
 
-const questionsOf = (request: ParsedRequest): Readonly<Record<string, string>> =>
-  request.research ?? request.deepResearch ?? {}
+type Entity = "person" | "company"
+type Tier = "research" | "deepResearch"
+
+const tierOf = (request: ParsedRequest): Tier =>
+  "deepResearch" in request.person ||
+  "deepResearch" in request.company ||
+  "phone" in request.person ||
+  "legalName" in request.company
+    ? "deepResearch"
+    : "research"
+
+const questionsOf = (
+  request: ParsedRequest,
+  entity: Entity
+): Readonly<Record<string, string | ResearchJSONSchema>> => {
+  const tier = tierOf(request)
+  if (tier === "research") {
+    // SAFETY: tierOf identifies ResearchRequest from its route-exclusive entity keys.
+    const researchRequest = request as ResearchRequest
+    return researchRequest[entity].research ?? {}
+  }
+  // SAFETY: tierOf identifies DeepResearchRequest from its route-exclusive entity keys.
+  const deepResearchRequest = request as DeepResearchRequest
+  return deepResearchRequest[entity].deepResearch ?? {}
+}
+
+const builtInsOf = (request: ParsedRequest, entity: Entity) => {
+  const tier = tierOf(request)
+  return Object.keys(request[entity]).filter((key) => key !== tier)
+}
 
 type CacheEntry = {
   readonly field: TerminalField
@@ -72,9 +116,10 @@ type Run = {
   readonly request: ParsedRequest
   readonly events: WireEvent[]
   readonly identity: { company: IdentityStatus; person: IdentityStatus }
+  readonly startedBatches: Set<string>
   readonly startedPaths: Set<string>
   readonly subscribers: Set<Subscription>
-  snapshot: SonarSnapshot
+  snapshot: BackendSnapshot
   complete: boolean
 }
 
@@ -92,6 +137,12 @@ export type BackendInspection = {
   readonly emittedEvents: readonly WireEvent[]
   readonly networkCalls: number
   readonly openScopes: number
+  readonly providerBatches: readonly {
+    readonly entity: Entity
+    readonly paths: readonly string[]
+    readonly provider: "firecrawl" | "parallel" | "sixtyFour"
+    readonly tier: "builtIn" | Tier
+  }[]
   readonly providerCalls: Readonly<Record<string, number>>
   readonly runsCancelled: number
   readonly runsStarted: number
@@ -111,6 +162,8 @@ const consumerDomains = new Set([
   "protonmail.com",
   "yahoo.com",
 ])
+const isCompanySiteField = (value: string): value is CompanySiteField =>
+  value === "name" || value === "logo" || value === "colors" || value === "description"
 
 const clone = <Value>(value: Value): Value => structuredClone(value)
 
@@ -190,15 +243,10 @@ const normalizedSeed = (seed: SonarSeed) => {
 
 const configOf = (request: ParsedRequest) => {
   const configEntries: [string, JSONValue][] = [
-    ["company", [...request.company].toSorted(compareCodeUnits)],
-    ["person", [...request.person].toSorted(compareCodeUnits)],
+    ["company", normalizedJSON(request.company)],
+    ["person", normalizedJSON(request.person)],
     ["ttl", request.ttl],
   ]
-  if (request.deepResearch === undefined) {
-    configEntries.push(["research", normalizedJSON(request.research ?? {})])
-  } else {
-    configEntries.push(["deepResearch", normalizedJSON(request.deepResearch)])
-  }
   return Object.fromEntries(
     configEntries.toSorted(([left], [right]) => compareCodeUnits(left, right))
   )
@@ -232,50 +280,99 @@ const ttlMilliseconds = (ttl: string) => {
   }
 }
 
-const pathsOf = (request: ParsedRequest) => [
-  ...request.person.map((field) => `person.${field}`),
-  ...request.company.map((field) => `company.${field}`),
-  ...Object.keys(questionsOf(request)),
-]
+const pathsOf = (request: ParsedRequest) => {
+  const tier = tierOf(request)
+  return (["person", "company"] as const).flatMap((entity) => [
+    ...builtInsOf(request, entity).map((field) => `${entity}.${field}`),
+    ...Object.keys(questionsOf(request, entity)).map((key) => `${entity}.${tier}.${key}`),
+  ])
+}
 
-const isBuiltIn = (path: string) => path.startsWith("person.") || path.startsWith("company.")
+const isBuiltIn = (path: string) => path.split(".").length === 2
 
-const fieldAt = (snapshot: SonarSnapshot, path: string): Field | undefined => {
-  const [slot, key, extra] = path.split(".")
-  if (extra === undefined && key !== undefined && slot === "person") {
-    return Object.entries(snapshot.data.person).find(([candidate]) => candidate === key)?.[1]
+const fieldAt = (snapshot: BackendSnapshot, path: string): Field | undefined => {
+  const [slot, namespaceOrKey, customKey, extra] = path.split(".")
+  if (
+    extra !== undefined ||
+    namespaceOrKey === undefined ||
+    (slot !== "person" && slot !== "company")
+  ) {
+    return undefined
   }
-  if (extra === undefined && key !== undefined && slot === "company") {
-    return Object.entries(snapshot.data.company).find(([candidate]) => candidate === key)?.[1]
+  const entity = snapshot.data[slot]
+  if (customKey === undefined) {
+    const candidate = Object.entries(entity).find(([key]) => key === namespaceOrKey)?.[1]
+    const parsed = APIField.safeParse(candidate)
+    return parsed.success ? parsed.data : undefined
   }
-  const custom = Object.entries(snapshot.data).find(([candidate]) => candidate === path)?.[1]
+  if (namespaceOrKey !== "research" && namespaceOrKey !== "deepResearch") {
+    return undefined
+  }
+  const namespace = namespaceOrKey === "research" ? entity.research : entity.deepResearch
+  const custom = namespace?.[customKey]
   const parsed = APIField.safeParse(custom)
   return parsed.success ? parsed.data : undefined
 }
 
-const withField = (snapshot: SonarSnapshot, path: string, field: TerminalField): SonarSnapshot => {
-  const [slot, key, extra] = path.split(".")
-  if (extra === undefined && key !== undefined && (slot === "person" || slot === "company")) {
+const withField = (
+  snapshot: BackendSnapshot,
+  path: string,
+  field: TerminalField
+): BackendSnapshot => {
+  const [slot, namespaceOrKey, customKey, extra] = path.split(".")
+  if (
+    extra !== undefined ||
+    namespaceOrKey === undefined ||
+    (slot !== "person" && slot !== "company")
+  ) {
+    return snapshot
+  }
+  if (customKey === undefined) {
     return {
       ...snapshot,
       data: {
         ...snapshot.data,
-        [slot]: { ...snapshot.data[slot], [key]: field },
+        [slot]: { ...snapshot.data[slot], [namespaceOrKey]: field },
       },
     }
   }
-  return { ...snapshot, data: { ...snapshot.data, [path]: field } }
+  if (namespaceOrKey !== "research" && namespaceOrKey !== "deepResearch") {
+    return snapshot
+  }
+  return {
+    ...snapshot,
+    data: {
+      ...snapshot.data,
+      [slot]: {
+        ...snapshot.data[slot],
+        [namespaceOrKey]: {
+          ...(namespaceOrKey === "research"
+            ? snapshot.data[slot].research
+            : snapshot.data[slot].deepResearch),
+          [customKey]: field,
+        },
+      },
+    },
+  }
 }
 
-const initialSnapshot = (request: ParsedRequest): SonarSnapshot => {
-  const person = Object.fromEntries(request.person.map((path) => [path, pending]))
-  const company = Object.fromEntries(request.company.map((path) => [path, pending]))
-  const questions = questionsOf(request)
+const initialSnapshot = (request: ParsedRequest): BackendSnapshot => {
+  const tier = tierOf(request)
+  const entitySnapshot = (entity: Entity) => {
+    const questions = questionsOf(request, entity)
+    const builtIns = Object.fromEntries(builtInsOf(request, entity).map((path) => [path, pending]))
+    if (Object.keys(questions).length === 0) {
+      return builtIns
+    }
+    const custom = Object.fromEntries(Object.keys(questions).map((key) => [key, pending]))
+    return tier === "research"
+      ? { ...builtIns, research: custom }
+      : { ...builtIns, deepResearch: custom }
+  }
   // oxlint-disable-next-line sort-keys -- The wire contract requires person before company.
   const data = {
-    person,
-    company,
-    ...Object.fromEntries(Object.keys(questions).map((key) => [key, pending])),
+    person: entitySnapshot("person"),
+    company: entitySnapshot("company"),
   }
   return { data, status: "pending" }
 }
@@ -310,15 +407,48 @@ const defaultValue = (path: string): JSONValue => {
   if (path === "company.colors" || path === "company.location" || path === "company.funding") {
     return {}
   }
-  if (path.startsWith("person.") || path.startsWith("company.")) {
+  if (isBuiltIn(path)) {
+    return `resolved ${path}`
+  }
+  if (path.includes(".deepResearch.")) {
     return `resolved ${path}`
   }
   return true
 }
 
+const emailDomain = (seed: SonarSeed) => seed.email?.split("@").at(-1)?.trim().toLowerCase()
+
 const isConsumerEmail = (seed: SonarSeed) => {
-  const domain = seed.email?.split("@").at(-1)?.toLowerCase()
+  const domain = emailDomain(seed)
   return domain === undefined || consumerDomains.has(domain)
+}
+
+const companyDomainFromSeed = (seed: SonarSeed) => {
+  const explicit = seed.domain?.trim().toLowerCase()
+  if (explicit !== undefined) {
+    return explicit
+  }
+  const fromEmail = emailDomain(seed)
+  return fromEmail !== undefined && !consumerDomains.has(fromEmail) ? fromEmail : undefined
+}
+
+const companyDomainOf = (run: Run) => {
+  const fromSeed = companyDomainFromSeed(run.request.seed)
+  if (fromSeed !== undefined) {
+    return fromSeed
+  }
+  const domainField = fieldAt(run.snapshot, "company.domain")
+  const value = domainField?.status === "resolved" ? domainField.value : undefined
+  /* oxlint-disable anti-slop/no-runtime-typeof -- The public snapshot boundary validates company.domain as a string before this identity-gated branch. */
+  const domain = typeof value === "string" ? value.trim().toLowerCase() : undefined
+  /* oxlint-enable anti-slop/no-runtime-typeof */
+  return domain !== undefined && domain.length > 0 ? domain : undefined
+}
+
+const providerIdentity = (run: Run, entity: Entity) => {
+  const identity = normalizedSeed(run.request.seed)
+  const domain = entity === "company" ? companyDomainOf(run) : undefined
+  return domain === undefined ? identity : { ...identity, domain }
 }
 
 const cacheIdentity = (run: Run, path: string, scope: CacheScope) => {
@@ -326,8 +456,12 @@ const cacheIdentity = (run: Run, path: string, scope: CacheScope) => {
   if (scope === "builtIn") {
     return `builtIn:${path}:${subject}`
   }
-  const questions = questionsOf(run.request)
-  return `custom:${run.tenantId}:${run.route}:${path}:${ownValue(questions, path) ?? ""}:${subject}`
+  const [entity, tier, key] = path.split(".")
+  if ((entity !== "person" && entity !== "company") || key === undefined) {
+    return `custom:${run.tenantId}:${run.route}:${path}:${subject}`
+  }
+  const questions = questionsOf(run.request, entity)
+  return `custom:${run.tenantId}:${run.route}:${entity}:${tier}:${key}:${JSON.stringify(ownValue(questions, key) ?? "")}:${subject}`
 }
 
 const snapshotResponse = (run: Run) => jsonResponse({ hash: run.hash, ...clone(run.snapshot) })
@@ -340,6 +474,9 @@ export class BackendEngine {
   readonly #cache = new Map<string, CacheEntry>()
   readonly #cachedFields: Record<string, TerminalField> = {}
   readonly #providerCalls = new Map<string, number>()
+  readonly #providerBatches: BackendInspection["providerBatches"][number][] = []
+  readonly #providerRunner: ProviderRunner | undefined
+  readonly #providerControllers = new Set<AbortController>()
   readonly #responseSubscriptions = new Map<Response, Subscription>()
   readonly #readers = new Map<Response, ReadableStreamDefaultReader<Uint8Array>>()
   #now: number
@@ -351,6 +488,7 @@ export class BackendEngine {
 
   constructor(options: EngineOptions) {
     this.#serverSecret = options.serverSecret
+    this.#providerRunner = options.providerRunner
     this.#tenants = new Map(options.tenants.map((tenant) => [tenant.key, tenant]))
     this.#scenario = options.scenario ?? {}
     this.#now = Date.parse(this.#scenario.now ?? "2026-08-26T12:00:00.000Z")
@@ -370,6 +508,7 @@ export class BackendEngine {
       emittedEvents: [...this.#runs.values()].flatMap((run) => clone(run.events)),
       networkCalls: 0,
       openScopes: this.#openScopes,
+      providerBatches: clone(this.#providerBatches),
       providerCalls: Object.fromEntries(this.#providerCalls),
       runsCancelled: this.#runsCancelled,
       runsStarted: this.#runsStarted,
@@ -475,12 +614,13 @@ export class BackendEngine {
       events: [{ data: clone(snapshot), event: "snapshot", id: "0" }],
       hash,
       identity: {
-        company: request.seed.domain === undefined ? "pending" : "resolved",
-        person: request.seed.linkedinURL === undefined ? "pending" : "resolved",
+        company: companyDomainFromSeed(request.seed) === undefined ? "pending" : "resolved",
+        person: "resolved",
       },
       request,
       route,
       snapshot,
+      startedBatches: new Set(),
       startedPaths: new Set(),
       subscribers: new Set(),
       tenantId: tenant.tenantId,
@@ -500,6 +640,7 @@ export class BackendEngine {
       this.#updateIdentityGate(run, path, cached, false)
     }
     this.#applyImmediateSkips(run)
+    this.#applyUnavailableCustomSkips(run)
     this.#startReadyPaths(run)
     if (this.#scenario.autoSettle ?? false) {
       this.#settleAllRun(run)
@@ -521,6 +662,25 @@ export class BackendEngine {
     }
   }
 
+  #applyUnavailableCustomSkips(run: Run) {
+    const tier = tierOf(run.request)
+    for (const entity of ["person", "company"] as const) {
+      const identityPath = entity === "person" ? "person.linkedin" : "company.domain"
+      if (run.identity[entity] !== "pending" || fieldAt(run.snapshot, identityPath) !== undefined) {
+        continue
+      }
+      const reason = entity === "person" ? "noPersonSeed" : "noCompanySeed"
+      for (const path of pathsOf(run.request)) {
+        if (
+          path.startsWith(`${entity}.${tier}.`) &&
+          fieldAt(run.snapshot, path)?.status === "pending"
+        ) {
+          this.#settleRun(run, path, { reason, status: "skipped" }, false)
+        }
+      }
+    }
+  }
+
   #startReadyPaths(run: Run) {
     for (const path of pathsOf(run.request)) {
       if (fieldAt(run.snapshot, path)?.status !== "pending") {
@@ -530,12 +690,175 @@ export class BackendEngine {
         path === "company.domain" ||
         path === "person.linkedin" ||
         (path.startsWith("company.") && run.identity.company === "resolved") ||
-        (path.startsWith("person.") && run.identity.person === "resolved") ||
-        (!isBuiltIn(path) && run.identity.company === "resolved")
+        (path.startsWith("person.") && run.identity.person === "resolved")
       if (ready) {
-        this.#startPath(run, path)
+        if (isBuiltIn(path)) {
+          const companyField = path.startsWith("company.") ? path.slice("company.".length) : ""
+          if (this.#providerRunner?.companySite !== undefined && isCompanySiteField(companyField)) {
+            this.#startCompanySiteBatch(run)
+          } else {
+            this.#startPath(run, path)
+          }
+        } else {
+          const [entity] = path.split(".")
+          if (entity === "person" || entity === "company") {
+            this.#startBatch(run, entity)
+          }
+        }
       }
     }
+  }
+
+  #startCompanySiteBatch(run: Run) {
+    const batchKey = "builtIn:companySite"
+    if (run.startedBatches.has(batchKey)) {
+      return
+    }
+    const paths = pathsOf(run.request).filter((path) => {
+      const field = path.startsWith("company.") ? path.slice("company.".length) : ""
+      return isCompanySiteField(field) && fieldAt(run.snapshot, path)?.status === "pending"
+    })
+    if (paths.length === 0) {
+      return
+    }
+    const domain = companyDomainOf(run)
+    if (domain === undefined || domain.length === 0) {
+      return
+    }
+    run.startedBatches.add(batchKey)
+    for (const path of paths) {
+      run.startedPaths.add(path)
+    }
+    this.#providerCalls.set(
+      "firecrawl.company",
+      (this.#providerCalls.get("firecrawl.company") ?? 0) + 1
+    )
+    this.#providerBatches.push({ entity: "company", paths, provider: "firecrawl", tier: "builtIn" })
+    this.#executeCompanySiteBatch(run, domain, paths)
+  }
+
+  #executeCompanySiteBatch(run: Run, domain: string, paths: readonly string[]) {
+    const companySite = this.#providerRunner?.companySite
+    if (companySite === undefined) {
+      return
+    }
+    const controller = new AbortController()
+    this.#providerControllers.add(controller)
+    const fields = paths.flatMap((path) => {
+      const field = path.slice("company.".length)
+      return isCompanySiteField(field) ? [field] : []
+    })
+    void this.#settleBatchPromise(
+      run,
+      paths,
+      controller,
+      companySite({ domain, fields }, controller.signal)
+    )
+  }
+
+  #startBatch(run: Run, entity: Entity) {
+    const tier = tierOf(run.request)
+    const batchKey = `${tier}:${entity}`
+    if (run.startedBatches.has(batchKey)) {
+      return
+    }
+    const paths = pathsOf(run.request).filter(
+      (path) =>
+        path.startsWith(`${entity}.${tier}.`) && fieldAt(run.snapshot, path)?.status === "pending"
+    )
+    if (paths.length === 0) {
+      return
+    }
+    run.startedBatches.add(batchKey)
+    for (const path of paths) {
+      run.startedPaths.add(path)
+    }
+    const provider = tier === "research" ? "parallel" : "sixtyFour"
+    const callKey = `${provider}.${entity}`
+    this.#providerCalls.set(callKey, (this.#providerCalls.get(callKey) ?? 0) + 1)
+    this.#providerBatches.push({ entity, paths, provider, tier })
+    this.#executeBatch(run, entity, tier, paths)
+  }
+
+  #executeBatch(run: Run, entity: Entity, tier: Tier, paths: readonly string[]) {
+    if (this.#providerRunner === undefined) {
+      return
+    }
+    const questions = questionsOf(run.request, entity)
+    const controller = new AbortController()
+    this.#providerControllers.add(controller)
+    const requestId = `${run.hash}:${entity}:${tier}`
+    const promise =
+      tier === "research"
+        ? this.#providerRunner.research(
+            {
+              entity,
+              identity: providerIdentity(run, entity),
+              questions,
+              requestId,
+            },
+            controller.signal
+          )
+        : this.#providerRunner.deepResearch(
+            {
+              entity,
+              identity: providerIdentity(run, entity),
+              // SAFETY: DeepResearchRequest is the only source of deepResearch question maps.
+              questions: questions as Readonly<Record<string, string>>,
+              requestId,
+            },
+            controller.signal
+          )
+    void this.#settleBatchPromise(run, paths, controller, promise)
+  }
+
+  async #settleBatchPromise(
+    run: Run,
+    paths: readonly string[],
+    controller: AbortController,
+    promise: Promise<Readonly<Record<string, ProviderAnswer>>>
+  ) {
+    try {
+      const answers = await promise
+      if (controller.signal.aborted) {
+        return
+      }
+      for (const path of paths) {
+        const key = path.split(".").at(-1)
+        const answer = key === undefined ? undefined : ownValue(answers, key)
+        this.#settleProviderAnswer(run, path, answer)
+      }
+    } catch (error) {
+      if (controller.signal.aborted) {
+        return
+      }
+      const reason =
+        error instanceof ProviderFailure && error.kind === "timeout" ? "timeout" : "providerEmpty"
+      for (const path of paths) {
+        this.#settleRun(run, path, { reason, status: "notFound" }, true)
+      }
+    } finally {
+      this.#providerControllers.delete(controller)
+    }
+  }
+
+  #settleProviderAnswer(run: Run, path: string, answer: ProviderAnswer | undefined) {
+    if (answer?.status !== "resolved") {
+      this.#settleRun(run, path, { reason: "providerEmpty", status: "notFound" }, true)
+      return
+    }
+    this.#settleRun(
+      run,
+      path,
+      {
+        confidence: answer.confidence,
+        resolvedAt: new Date(this.#now).toISOString(),
+        sources: [...answer.sources],
+        status: "resolved",
+        value: answer.value,
+      },
+      true
+    )
   }
 
   #startPath(run: Run, path: string) {
@@ -632,29 +955,31 @@ export class BackendEngine {
   }
 
   #updateIdentityGate(run: Run, path: string, field: TerminalField, startDependents = true) {
-    let side: "person" | "company" | undefined
     if (path === "person.linkedin") {
-      side = "person"
-    } else if (path === "company.domain") {
-      side = "company"
+      if (field.status === "resolved" && startDependents) {
+        this.#startReadyPaths(run)
+      }
+      return
     }
-    if (side === undefined) {
+    if (path !== "company.domain") {
       return
     }
     if (field.status === "resolved") {
-      run.identity[side] = "resolved"
+      run.identity.company = "resolved"
       if (startDependents) {
         this.#startReadyPaths(run)
       }
       return
     }
-    run.identity[side] = "notFound"
+    if (companyDomainFromSeed(run.request.seed) !== undefined) {
+      return
+    }
+    run.identity.company = "notFound"
     for (const pendingPath of pathsOf(run.request)) {
-      const isDependent =
-        side === "person"
-          ? pendingPath.startsWith("person.")
-          : pendingPath.startsWith("company.") || !isBuiltIn(pendingPath)
-      if (isDependent && fieldAt(run.snapshot, pendingPath)?.status === "pending") {
+      if (
+        pendingPath.startsWith("company.") &&
+        fieldAt(run.snapshot, pendingPath)?.status === "pending"
+      ) {
         this.#settleRun(run, pendingPath, { reason: "identityFailed", status: "notFound" }, false)
       }
     }
@@ -893,10 +1218,15 @@ export class BackendEngine {
       return Promise.resolve()
     }
     this.#closed = true
+    for (const controller of this.#providerControllers) {
+      controller.abort()
+      this.#runsCancelled += 1
+    }
+    this.#providerControllers.clear()
     for (const subscription of this.#responseSubscriptions.values()) {
       subscription.controller?.close()
       this.#finalizeSubscription(subscription)
     }
-    return Promise.resolve()
+    return this.#providerRunner?.close?.() ?? Promise.resolve()
   }
 }

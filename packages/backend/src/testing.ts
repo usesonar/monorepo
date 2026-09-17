@@ -10,6 +10,7 @@ export const createBackendTestHarness = (options: Partial<EngineOptions> = {}) =
     throw new TypeError("The backend test harness requires a server secret and tenants")
   }
   const engine = new BackendEngine({
+    providerRunner: options.providerRunner,
     scenario: options.scenario,
     serverSecret: options.serverSecret,
     tenants: options.tenants,

@@ -6,6 +6,9 @@ import { SonarBackend, createSonarHandler, layer } from "@usesonar/backend"
 import { createBackendTestHarness } from "@usesonar/backend/testing"
 import type { FakeScenario, TestTenant } from "@usesonar/backend/testing"
 
+import { ProviderFailure } from "./providers.ts"
+import type { CompanySiteBatch, ParallelBatch, SixtyFourBatch } from "./providers.ts"
+
 const serverSecret = "verifier-only-server-secret"
 const tenantAKey = "pk_test_tenant_a"
 const tenantBKey = "sk_tenant_b"
@@ -18,25 +21,54 @@ type JSONValue =
   | readonly JSONValue[]
   | { readonly [key: string]: JSONValue }
 type Field = { status: string; reason?: string } & { readonly [key: string]: JSONValue }
+type EntitySnapshot = Record<string, Field> & {
+  research: Record<string, Field>
+  deepResearch: Record<string, Field>
+}
 type Snapshot = {
   hash?: string
   status?: string
-  data: { person: Record<string, Field>; company: Record<string, Field> } & Record<string, Field>
+  data: { person: EntitySnapshot; company: EntitySnapshot }
 }
 type RequestBody = { readonly [key: string]: JSONValue }
 
-const research = (overrides: RequestBody = {}) => ({
-  company: ["domain", "name"],
-  person: ["linkedin", "title"],
-  research: { sellsToSMB: "Who does this company sell to?" },
-  seed: {
-    domain: "Example.COM",
-    fullName: "Ada Lovelace",
-    xURL: "https://x.com/@Ada",
-  },
-  ttl: "24h",
-  ...overrides,
-})
+const isJSONObject = (value: JSONValue): value is { [key: string]: JSONValue } =>
+  value !== null && !Array.isArray(value) && Object(value) === value
+
+const selection = (value: JSONValue | undefined, defaults: readonly string[]) => {
+  if (Array.isArray(value)) {
+    return Object.fromEntries(value.map((key) => [String(key), true]))
+  }
+  return value ?? Object.fromEntries(defaults.map((key) => [key, true]))
+}
+
+const research = (overrides: RequestBody = {}) => {
+  const flatQuestions = overrides.research
+  const company = selection(overrides.company, ["domain", "name"])
+  const person = selection(overrides.person, ["linkedin", "title"])
+  const body = {
+    seed: {
+      domain: "Example.COM",
+      fullName: "Ada Lovelace",
+      xURL: "https://x.com/@Ada",
+    },
+    ttl: "24h",
+    ...overrides,
+    company,
+    person,
+  }
+  delete body.research
+  if (isJSONObject(company)) {
+    company.research = Object.fromEntries(
+      Object.entries(
+        isJSONObject(flatQuestions)
+          ? flatQuestions
+          : { sellsToSMB: "Who does this company sell to?" }
+      ).map(([key, description]) => [key, { description: String(description), type: "boolean" }])
+    )
+  }
+  return body
+}
 
 const headersFor = (options: {
   accept?: string
@@ -242,16 +274,14 @@ describe("VLD-001 validation and representation negotiation", () => {
     const deepResponses = await Promise.all(
       [
         {
-          company: [],
-          deepResearch: {},
-          person: ["title"],
+          company: {},
+          person: { title: true },
           seed: { linkedinURL: "https://linkedin.com/in/ada" },
           ttl: "12h",
         },
         {
-          company: ["name"],
-          deepResearch: {},
-          person: [],
+          company: { name: true },
+          person: {},
           seed: { linkedinURL: "https://linkedin.com/in/ada" },
           ttl: "12h",
         },
@@ -322,9 +352,17 @@ describe("HASH-001 canonical HMAC identity", () => {
         request(
           "/v1/research",
           {
-            company: ["domain", "name"],
-            person: ["linkedin", "title"],
-            research: { sellsToSMB: "Who does this company sell to?" },
+            company: {
+              domain: true,
+              name: true,
+              research: {
+                sellsToSMB: {
+                  description: "Who does this company sell to?",
+                  type: "boolean",
+                },
+              },
+            },
+            person: { linkedin: true, title: true },
             seed: {
               domain: "example.com",
               fullName: "Ada Lovelace",
@@ -346,9 +384,11 @@ describe("HASH-001 canonical HMAC identity", () => {
       request(
         "/v1/deepResearch",
         {
-          company: ["legalName"],
-          deepResearch: { doesUseXero: "Does it use Xero?" },
-          person: ["phone"],
+          company: {
+            deepResearch: { doesUseXero: "Does it use Xero?" },
+            legalName: true,
+          },
+          person: { phone: true },
           seed: { domain: "example.com", fullName: "Ada Lovelace", xURL: "https://x.com/ada" },
           ttl: "24h",
         },
@@ -374,9 +414,17 @@ describe("HASH-001 canonical HMAC identity", () => {
           xURL: "https://x.com/ada",
         },
         {
-          company: ["domain", "name"],
-          person: ["linkedin", "title"],
-          research: { sellsToSMB: "Who does this company sell to?" },
+          company: {
+            domain: true,
+            name: true,
+            research: {
+              sellsToSMB: {
+                description: "Who does this company sell to?",
+                type: "boolean",
+              },
+            },
+          },
+          person: { linkedin: true, title: true },
           ttl: "24h",
         }
       )
@@ -449,6 +497,531 @@ describe("RUN-001 idempotent and concurrent orchestration", () => {
     expect(streamResponse.status).toBe(200)
     expect(backend.inspect().runsStarted).toBe(1)
   })
+
+  test("batches custom questions once per owning entity and tier", async () => {
+    const backend = await boot({ scenario: { autoSettle: false } })
+    await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: {
+            research: {
+              market: { description: "Describe the market.", type: "string" },
+              segment: { description: "Describe the segment.", type: "string" },
+            },
+          },
+          person: {
+            research: {
+              interests: { description: "Describe public interests.", type: "array" },
+            },
+          },
+          seed: {
+            domain: "example.com",
+            linkedinURL: "https://linkedin.com/in/ada",
+          },
+          ttl: "24h",
+        },
+        { key: tenantAKey }
+      )
+    )
+    await backend.fetch(
+      request(
+        "/v1/deepResearch",
+        {
+          company: { deepResearch: { ownership: "Describe company ownership." } },
+          person: { deepResearch: { background: "Describe the person's background." } },
+          seed: {
+            domain: "example.com",
+            linkedinURL: "https://linkedin.com/in/ada",
+          },
+          ttl: "24h",
+        },
+        { key: tenantAKey }
+      )
+    )
+
+    expect(backend.inspect().providerBatches).toEqual([
+      {
+        entity: "person",
+        paths: ["person.research.interests"],
+        provider: "parallel",
+        tier: "research",
+      },
+      {
+        entity: "company",
+        paths: ["company.research.market", "company.research.segment"],
+        provider: "parallel",
+        tier: "research",
+      },
+      {
+        entity: "person",
+        paths: ["person.deepResearch.background"],
+        provider: "sixtyFour",
+        tier: "deepResearch",
+      },
+      {
+        entity: "company",
+        paths: ["company.deepResearch.ownership"],
+        provider: "sixtyFour",
+        tier: "deepResearch",
+      },
+    ])
+    expect(backend.inspect().providerCalls).toEqual({
+      "parallel.company": 1,
+      "parallel.person": 1,
+      "sixtyFour.company": 1,
+      "sixtyFour.person": 1,
+    })
+  })
+
+  test("runs person research and deepResearch from a full-name and email seed", async () => {
+    const researchBatches: ParallelBatch[] = []
+    const deepResearchBatches: SixtyFourBatch[] = []
+    const backend = await boot({
+      providerRunner: {
+        deepResearch: (batch) => {
+          deepResearchBatches.push(batch)
+          return Promise.resolve({
+            background: {
+              confidence: 1,
+              sources: [],
+              status: "resolved",
+              value: "Deep background",
+            },
+          })
+        },
+        research: (batch) => {
+          researchBatches.push(batch)
+          return Promise.resolve({
+            role: { confidence: 1, sources: [], status: "resolved", value: "Engineer" },
+          })
+        },
+      },
+      scenario: { autoSettle: false },
+    })
+    const personSeed = { email: "ada@gmail.com", fullName: "Ada Lovelace" }
+    const researchCreated = await json(
+      await backend.fetch(
+        request(
+          "/v1/research",
+          {
+            company: {},
+            person: { research: { role: { description: "Find the role.", type: "string" } } },
+            seed: personSeed,
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    const deepCreated = await json(
+      await backend.fetch(
+        request(
+          "/v1/deepResearch",
+          {
+            company: {},
+            person: { deepResearch: { background: "Research the person's background." } },
+            seed: personSeed,
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(researchBatches).toHaveLength(1)
+    expect(researchBatches[0]?.entity).toBe("person")
+    expect(deepResearchBatches).toHaveLength(1)
+    expect(deepResearchBatches[0]?.entity).toBe("person")
+    expect(backend.snapshot(hashOf(researchCreated)).data.person.research.role).toMatchObject({
+      status: "resolved",
+      value: "Engineer",
+    })
+    expect(backend.snapshot(hashOf(deepCreated)).data.person.deepResearch.background).toMatchObject(
+      {
+        status: "resolved",
+        value: "Deep background",
+      }
+    )
+  })
+
+  test("derives company identity only from a non-consumer email domain", async () => {
+    const researchBatches: ParallelBatch[] = []
+    const deepResearchBatches: SixtyFourBatch[] = []
+    const backend = await boot({
+      providerRunner: {
+        deepResearch: (batch) => {
+          deepResearchBatches.push(batch)
+          return Promise.resolve({
+            ownership: {
+              confidence: 1,
+              sources: [],
+              status: "resolved",
+              value: "Privately held",
+            },
+          })
+        },
+        research: (batch) => {
+          researchBatches.push(batch)
+          return Promise.resolve({
+            segment: { confidence: 1, sources: [], status: "resolved", value: "Enterprise" },
+          })
+        },
+      },
+      scenario: { autoSettle: false },
+    })
+    const companySeed = { email: "ada@Acme.COM", fullName: "Ada Lovelace" }
+    const researchCreated = await json(
+      await backend.fetch(
+        request(
+          "/v1/research",
+          {
+            company: {
+              research: { segment: { description: "Find the segment.", type: "string" } },
+            },
+            person: {},
+            seed: companySeed,
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    const deepCreated = await json(
+      await backend.fetch(
+        request(
+          "/v1/deepResearch",
+          {
+            company: { deepResearch: { ownership: "Research company ownership." } },
+            person: {},
+            seed: companySeed,
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(researchBatches[0]?.identity.domain).toBe("acme.com")
+    expect(deepResearchBatches[0]?.identity.domain).toBe("acme.com")
+    expect(backend.snapshot(hashOf(researchCreated)).data.company.research.segment).toMatchObject({
+      status: "resolved",
+      value: "Enterprise",
+    })
+    expect(backend.snapshot(hashOf(deepCreated)).data.company.deepResearch.ownership).toMatchObject(
+      {
+        status: "resolved",
+        value: "Privately held",
+      }
+    )
+  })
+
+  test("terminally skips company custom fields for LinkedIn- and X-only identity", async () => {
+    let calls = 0
+    const backend = await boot({
+      providerRunner: {
+        deepResearch: () => {
+          calls += 1
+          return Promise.resolve({})
+        },
+        research: () => {
+          calls += 1
+          return Promise.resolve({})
+        },
+      },
+      scenario: { autoSettle: false },
+    })
+    const linkedinCreated = await json(
+      await backend.fetch(
+        request(
+          "/v1/research",
+          {
+            company: {
+              research: { segment: { description: "Find the segment.", type: "string" } },
+            },
+            person: {},
+            seed: { linkedinURL: "https://linkedin.com/in/ada" },
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    const xCreated = await json(
+      await backend.fetch(
+        request(
+          "/v1/deepResearch",
+          {
+            company: { deepResearch: { ownership: "Research company ownership." } },
+            person: {},
+            seed: { fullName: "Ada Lovelace", xURL: "https://x.com/ada" },
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+
+    expect(linkedinCreated.status).toBe("complete")
+    expect(linkedinCreated.data.company.research.segment).toEqual({
+      reason: "noCompanySeed",
+      status: "skipped",
+    })
+    expect(xCreated.status).toBe("complete")
+    expect(xCreated.data.company.deepResearch.ownership).toEqual({
+      reason: "noCompanySeed",
+      status: "skipped",
+    })
+    expect(calls).toBe(0)
+    expect(backend.inspect().providerBatches).toEqual([])
+  })
+
+  test("settles provider batches into nested namespaces without exposing provenance", async () => {
+    const backend = await boot({
+      providerRunner: {
+        deepResearch: () => Promise.resolve({}),
+        research: () =>
+          Promise.resolve({
+            signal: {
+              confidence: 0.5,
+              sources: ["https://example.com/source"],
+              status: "resolved",
+              value: { active: true },
+            },
+          }),
+      },
+      scenario: { autoSettle: false },
+    })
+    const created = await json(
+      await backend.fetch(
+        request(
+          "/v1/research",
+          {
+            company: {
+              research: {
+                signal: { description: "Find the current signal.", type: "object" },
+              },
+            },
+            person: {},
+            seed: { domain: "example.com", linkedinURL: "https://linkedin.com/in/ada" },
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+    const snapshot = backend.snapshot(hashOf(created))
+    expect(snapshot.status).toBe("complete")
+    expect(snapshot.data.company.research?.signal).toMatchObject({
+      confidence: 0.5,
+      sources: ["https://example.com/source"],
+      status: "resolved",
+      value: { active: true },
+    })
+    expect(JSON.stringify(snapshot)).not.toContain("parallel")
+    expect(JSON.stringify(snapshot)).not.toContain("runId")
+  })
+
+  test("batches compatible company-site built-ins into one domain-gated Firecrawl scrape", async () => {
+    const batches: CompanySiteBatch[] = []
+    const backend = await boot({
+      providerRunner: {
+        companySite: (batch) => {
+          batches.push(batch)
+          return Promise.resolve({
+            colors: {
+              confidence: 1,
+              sources: ["https://example.com"],
+              status: "resolved",
+              value: { primary: "#123456" },
+            },
+            description: {
+              confidence: 1,
+              sources: ["https://example.com"],
+              status: "resolved",
+              value: "Example description",
+            },
+            logo: {
+              confidence: 1,
+              sources: ["https://example.com"],
+              status: "resolved",
+              value: "https://example.com/logo.svg",
+            },
+            name: {
+              confidence: 1,
+              sources: ["https://example.com"],
+              status: "resolved",
+              value: "Example",
+            },
+          })
+        },
+        deepResearch: () => Promise.resolve({}),
+        research: () => Promise.resolve({}),
+      },
+      scenario: { autoSettle: false },
+    })
+    const created = await json(
+      await backend.fetch(
+        request(
+          "/v1/research",
+          {
+            company: { colors: true, description: true, logo: true, name: true },
+            person: {},
+            seed: { domain: "Example.COM", linkedinURL: "https://linkedin.com/in/ada" },
+            ttl: "24h",
+          },
+          { key: tenantAKey }
+        )
+      )
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const snapshot = backend.snapshot(hashOf(created))
+    expect(batches).toEqual([
+      { domain: "example.com", fields: ["name", "logo", "colors", "description"] },
+    ])
+    expect(snapshot.status).toBe("complete")
+    expect(snapshot.data.company.name).toMatchObject({ status: "resolved", value: "Example" })
+    expect(snapshot.data.company.logo).toMatchObject({
+      status: "resolved",
+      value: "https://example.com/logo.svg",
+    })
+    expect(backend.inspect().providerBatches).toEqual([
+      {
+        entity: "company",
+        paths: ["company.name", "company.logo", "company.colors", "company.description"],
+        provider: "firecrawl",
+        tier: "builtIn",
+      },
+    ])
+    expect(backend.inspect().providerCalls).toEqual({ "firecrawl.company": 1 })
+    expect(JSON.stringify(snapshot)).not.toContain("firecrawl")
+  })
+
+  test("settles Firecrawl auth, rate-limit, and timeout failures once without leaking causes", async () => {
+    const failures = {
+      "auth.example": "auth",
+      "rate.example": "rateLimited",
+      "timeout.example": "timeout",
+    } satisfies Readonly<Record<string, ProviderFailure["kind"]>>
+    const backend = await boot({
+      providerRunner: {
+        companySite: ({ domain }) =>
+          Promise.reject(new ProviderFailure({ kind: failures[domain] ?? "transport" })),
+        deepResearch: () => Promise.resolve({}),
+        research: () => Promise.resolve({}),
+      },
+      scenario: { autoSettle: false },
+    })
+
+    for (const [domain, kind] of Object.entries(failures)) {
+      // oxlint-disable-next-line no-await-in-loop -- Each domain creates an independently hashed run.
+      const created = await json(
+        // oxlint-disable-next-line no-await-in-loop -- The fake backend is intentionally exercised in deterministic request order.
+        await backend.fetch(
+          request(
+            "/v1/research",
+            {
+              company: { name: true },
+              person: {},
+              seed: { domain, linkedinURL: "https://linkedin.com/in/ada" },
+              ttl: "24h",
+            },
+            { key: tenantAKey }
+          )
+        )
+      )
+      // oxlint-disable-next-line no-await-in-loop -- Flush the isolated provider rejection.
+      await Promise.resolve()
+      const snapshot = backend.snapshot(hashOf(created))
+      expect(snapshot.data.company.name).toEqual({
+        reason: kind === "timeout" ? "timeout" : "providerEmpty",
+        status: "notFound",
+      })
+    }
+    const events = backend.inspect().emittedEvents
+    expect(
+      events.filter(
+        (event) =>
+          event.event === "field" && isJSONObject(event.data) && event.data.path === "company.name"
+      )
+    ).toHaveLength(3)
+    expect(events.filter((event) => event.event === "complete")).toHaveLength(3)
+    expect(JSON.stringify(events)).not.toContain("rateLimited")
+    expect(JSON.stringify(events)).not.toContain("auth")
+  })
+
+  test("does not scrape compatible fields when cached, gated, or unrequested", async () => {
+    let calls = 0
+    const backend = await boot({
+      providerRunner: {
+        companySite: () => {
+          calls += 1
+          return Promise.resolve({})
+        },
+        deepResearch: () => Promise.resolve({}),
+        research: () => Promise.resolve({}),
+      },
+      scenario: { autoSettle: false },
+    })
+    await backend.cacheField(
+      "company.name",
+      {
+        confidence: 1,
+        resolvedAt: "2026-08-26T12:00:00.000Z",
+        sources: ["https://example.com"],
+        status: "resolved",
+        value: "Cached Example",
+      },
+      { scope: "builtIn" }
+    )
+    await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: { name: true },
+          person: {},
+          seed: { domain: "example.com", linkedinURL: "https://linkedin.com/in/ada" },
+          ttl: "24h",
+        },
+        { key: tenantAKey }
+      )
+    )
+    await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: { logo: true },
+          person: {},
+          seed: { linkedinURL: "https://linkedin.com/in/ada" },
+          ttl: "24h",
+        },
+        { key: tenantAKey }
+      )
+    )
+    await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: { location: true },
+          person: {},
+          seed: { domain: "unrequested.example", linkedinURL: "https://linkedin.com/in/ada" },
+          ttl: "24h",
+        },
+        { key: tenantAKey }
+      )
+    )
+
+    expect(calls).toBe(0)
+    expect(backend.inspect().providerCalls["firecrawl.company"] ?? 0).toBe(0)
+  })
 })
 
 describe("SSE-001 snapshots, events, replay, and disconnect", () => {
@@ -466,7 +1039,7 @@ describe("SSE-001 snapshots, events, replay, and disconnect", () => {
     expect(initial.data.data.person.title.status).toBe("pending")
     expect(initial.data.data.company.domain.status).toBe("pending")
     expect(initial.data.data.company.name.status).toBe("pending")
-    expect(initial.data.data.sellsToSMB.status).toBe("pending")
+    expect(initial.data.data.company.research.sellsToSMB.status).toBe("pending")
 
     await backend.settle("company.domain", { status: "resolved", value: "example.com" })
     const domain = await backend.nextSSE(stream)
@@ -500,7 +1073,7 @@ describe("SSE-001 snapshots, events, replay, and disconnect", () => {
     expect(events.map((event) => event.id)).toEqual(events.map((_, index) => String(index + 2)))
     expect(
       events.filter((event) => event.event === "field").map((event) => event.data.path)
-    ).toEqual(["person.linkedin", "person.title", "company.name", "sellsToSMB"])
+    ).toEqual(["person.linkedin", "person.title", "company.name", "company.research.sellsToSMB"])
     expect(events.filter((event) => event.event === "complete")).toHaveLength(1)
     expect(events.at(-1)?.event).toBe("complete")
   })
@@ -514,9 +1087,8 @@ describe("TERM-001 terminal states, gates, and timeouts", () => {
         request(
           "/v1/deepResearch",
           {
-            company: [],
-            deepResearch: {},
-            person: ["phone"],
+            company: {},
+            person: { phone: true },
             seed: { email: "ada@gmail.com", fullName: "Ada" },
             ttl: "12h",
           },
@@ -576,7 +1148,13 @@ describe("TERM-001 terminal states, gates, and timeouts", () => {
   test("keeps the resolved person branch alive when company identity times out", async () => {
     const backend = await boot({ scenario: { autoSettle: false } })
     const run = await json(
-      await backend.fetch(request("/v1/research", research(), { key: tenantAKey }))
+      await backend.fetch(
+        request(
+          "/v1/research",
+          research({ seed: { fullName: "Ada Lovelace", xURL: "https://x.com/ada" } }),
+          { key: tenantAKey }
+        )
+      )
     )
     await backend.settle("person.linkedin", {
       status: "resolved",
@@ -592,7 +1170,7 @@ describe("TERM-001 terminal states, gates, and timeouts", () => {
       reason: "identityFailed",
       status: "notFound",
     })
-    expect(duringTimeout.data.sellsToSMB).toEqual({
+    expect(duringTimeout.data.company.research.sellsToSMB).toEqual({
       reason: "identityFailed",
       status: "notFound",
     })
@@ -648,7 +1226,10 @@ describe("TERM-001 terminal states, gates, and timeouts", () => {
       scenario: {
         fields: {
           "company.name": { status: "resolved", value: 42 },
-          sellsToSMB: { status: "resolved", value: { answer: true } },
+          "company.research.sellsToSMB": {
+            status: "resolved",
+            value: { answer: true },
+          },
         },
       },
     })
@@ -660,7 +1241,7 @@ describe("TERM-001 terminal states, gates, and timeouts", () => {
     expect(SonarResponse.safeParse(body).success).toBe(true)
     expect(body.status).toBe("complete")
     expect(body.data.company.name).toEqual({ reason: "providerEmpty", status: "notFound" })
-    expect(body.data.sellsToSMB).toMatchObject({
+    expect(body.data.company.research.sellsToSMB).toMatchObject({
       status: "resolved",
       value: { answer: true },
     })
@@ -669,9 +1250,13 @@ describe("TERM-001 terminal states, gates, and timeouts", () => {
       status: "notFound",
     })
     expect(
-      Object.values(body.data.person).some((field) => field.status === "pending") ||
-        Object.values(body.data.company).some((field) => field.status === "pending") ||
-        body.data.sellsToSMB.status === "pending"
+      Object.values(body.data.person).some(
+        (field) => "status" in field && field.status === "pending"
+      ) ||
+        Object.values(body.data.company).some(
+          (field) => "status" in field && field.status === "pending"
+        ) ||
+        body.data.company.research.sellsToSMB.status === "pending"
     ).toBe(false)
   })
 })
@@ -707,16 +1292,19 @@ describe("CACHE-001 cache boundaries and lifetimes", () => {
       await backend.fetch(request("/v1/research", research({ ttl: "25h" }), { key: tenantAKey }))
     )
     expect(backend.inspect().providerCalls["company.name"]).toBe(1)
-    expect(backend.inspect().providerCalls.sellsToSMB).toBe(1)
+    expect(backend.inspect().providerCalls["parallel.company"]).toBe(1)
     expect(sameTenant.status).toBe("complete")
     expect(sameTenant.data.company.name).toMatchObject({
       status: "resolved",
       value: "resolved company.name",
     })
-    expect(sameTenant.data.sellsToSMB).toMatchObject({ status: "resolved", value: true })
+    expect(sameTenant.data.company.research.sellsToSMB).toMatchObject({
+      status: "resolved",
+      value: true,
+    })
     await backend.fetch(request("/v1/research", research({ ttl: "26h" }), { key: tenantBKey }))
     expect(backend.inspect().providerCalls["company.name"]).toBe(1)
-    expect(backend.inspect().providerCalls.sellsToSMB).toBe(2)
+    expect(backend.inspect().providerCalls["parallel.company"]).toBe(2)
 
     const notFound = { reason: "providerEmpty", status: "notFound" }
     await backend.cacheField("company.name", notFound, { scope: "builtIn" })
@@ -732,9 +1320,8 @@ describe("CACHE-001 cache boundaries and lifetimes", () => {
         request(
           "/v1/deepResearch",
           {
-            company: [],
-            deepResearch: {},
-            person: ["phone"],
+            company: {},
+            person: { phone: true },
             seed: { email: "ada@gmail.com", fullName: "Ada" },
             ttl: "12h",
           },
@@ -745,6 +1332,52 @@ describe("CACHE-001 cache boundaries and lifetimes", () => {
     expect(skipped.data.person.phone.status).toBe("skipped")
     expect(backend.inspect().cachedFields["person.phone"]).toBeUndefined()
     expect(a.hash).toBeDefined()
+  })
+
+  test("keys custom answers by tenant, entity, tier, key, schema or prompt, and identity", async () => {
+    const backend = await boot({ scenario: { autoSettle: false } })
+    const body = (description: string, domain = "example.com") =>
+      research({
+        company: [],
+        person: [],
+        research: { signal: description },
+        seed: { domain, fullName: "Ada Lovelace", xURL: "https://x.com/ada" },
+      })
+
+    await backend.fetch(request("/v1/research", body("Find buying signals."), { key: tenantAKey }))
+    await backend.settleAll()
+    await backend.fetch(request("/v1/research", body("Find buying signals."), { key: tenantAKey }))
+    expect(backend.inspect().providerCalls["parallel.company"]).toBe(1)
+
+    await backend.fetch(request("/v1/research", body("Find hiring signals."), { key: tenantAKey }))
+    await backend.fetch(
+      request("/v1/research", body("Find buying signals.", "other.example"), {
+        key: tenantAKey,
+      })
+    )
+    await backend.fetch(request("/v1/research", body("Find buying signals."), { key: tenantBKey }))
+    expect(backend.inspect().providerCalls["parallel.company"]).toBe(4)
+
+    await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: {},
+          person: {
+            research: {
+              signal: { description: "Find buying signals.", type: "boolean" },
+            },
+          },
+          seed: {
+            domain: "example.com",
+            linkedinURL: "https://linkedin.com/in/ada",
+          },
+          ttl: "24h",
+        },
+        { key: tenantAKey }
+      )
+    )
+    expect(backend.inspect().providerCalls["parallel.person"]).toBe(1)
   })
 })
 
@@ -856,12 +1489,13 @@ describe("LAYER-001 deterministic Effect Layers and finalizers", () => {
       )
     )
 
-    expect(body.data.constructor).toMatchObject({ status: "resolved", value: true })
+    expect(body.data.company.research.constructor).toMatchObject({
+      status: "resolved",
+      value: true,
+    })
     const { providerCalls } = backend.inspect()
-    const { constructor: constructorCalls } = providerCalls
-    expect(Object.hasOwn(providerCalls, "constructor")).toBe(true)
-    expect(constructorCalls).toBe(1)
-    expect(Object.keys(providerCalls)).toEqual(["constructor"])
+    expect(providerCalls["parallel.company"]).toBe(1)
+    expect(Object.keys(providerCalls)).toEqual(["parallel.company"])
   })
 
   test("keeps built-in and custom provider-call probe keys unambiguous", async () => {
@@ -881,9 +1515,85 @@ describe("LAYER-001 deterministic Effect Layers and finalizers", () => {
     )
 
     expect(body.data.company.name).toMatchObject({ status: "resolved" })
-    expect(body.data.name).toMatchObject({ status: "resolved" })
+    expect(body.data.company.research.name).toMatchObject({ status: "resolved" })
     const { providerCalls } = backend.inspect()
-    expect(providerCalls).toEqual({ "company.name": 1, name: 1 })
+    expect(providerCalls).toEqual({ "company.name": 1, "parallel.company": 1 })
+  })
+
+  test("keeps an active Firecrawl scrape alive across disconnect and cancels it on backend close", async () => {
+    const signals: AbortSignal[] = []
+    const backend = await boot({
+      providerRunner: {
+        companySite: (_batch, signal) => {
+          signals.push(signal)
+          // oxlint-disable-next-line promise/avoid-new -- The fake must remain pending until the injected AbortSignal fires.
+          return new Promise<Readonly<Record<string, never>>>((_resolve, reject) => {
+            signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true })
+          })
+        },
+        deepResearch: () => Promise.resolve({}),
+        research: () => Promise.resolve({}),
+      },
+      scenario: { autoSettle: false },
+    })
+    const stream = await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: { name: true },
+          person: {},
+          seed: { domain: "example.com", linkedinURL: "https://linkedin.com/in/ada" },
+          ttl: "24h",
+        },
+        { accept: "text/event-stream", key: tenantAKey }
+      )
+    )
+    await backend.nextSSE(stream)
+    await backend.disconnect(stream)
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(false)
+
+    await backend.close()
+    expect(signals[0]?.aborted).toBe(true)
+    expect(backend.inspect().runsCancelled).toBe(1)
+  })
+
+  test("cancels active provider work only when the backend scope closes", async () => {
+    const signals: AbortSignal[] = []
+    const pendingProvider = (_batch: ParallelBatch | SixtyFourBatch, signal: AbortSignal) => {
+      signals.push(signal)
+      // oxlint-disable-next-line promise/avoid-new -- The fake must remain pending until the injected AbortSignal fires.
+      return new Promise<Readonly<Record<string, never>>>((_resolve, reject) => {
+        signal.addEventListener("abort", () => reject(new Error("cancelled")), { once: true })
+      })
+    }
+    const backend = await boot({
+      providerRunner: { deepResearch: pendingProvider, research: pendingProvider },
+      scenario: { autoSettle: false },
+    })
+    const stream = await backend.fetch(
+      request(
+        "/v1/research",
+        {
+          company: {
+            research: { signal: { description: "Find a signal.", type: "boolean" } },
+          },
+          person: {},
+          seed: { domain: "example.com", linkedinURL: "https://linkedin.com/in/ada" },
+          ttl: "24h",
+        },
+        { accept: "text/event-stream", key: tenantAKey }
+      )
+    )
+    await backend.nextSSE(stream)
+    await backend.disconnect(stream)
+    expect(signals).toHaveLength(1)
+    expect(signals[0]?.aborted).toBe(false)
+    expect(backend.inspect().runsCancelled).toBe(0)
+
+    await backend.close()
+    expect(signals[0]?.aborted).toBe(true)
+    expect(backend.inspect().runsCancelled).toBe(1)
   })
 })
 
