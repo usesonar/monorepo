@@ -1,20 +1,15 @@
 import { Effect, Layer, Stream } from "effect"
 
 import { SonarClient } from "./client.js"
-import type {
-  SonarClientService,
-  ValidConfig,
-  ValidDeepResearchRequest,
-  ValidResearchRequest,
-} from "./client.js"
+import type { SonarClientService } from "./client.js"
 import { RequestError } from "./errors.js"
 import type { ProtocolError } from "./errors.js"
 import { canonicalRequestIdentity } from "./identity.js"
 import { initialSnapshot } from "./model.js"
 import type {
-  DeepResearchConfig,
+  AnyDeepResearchConfig,
+  AnyResearchConfig,
   DeepResearchRequest,
-  ResearchConfig,
   ResearchRequest,
   SonarProtocolEvent,
   SonarSnapshot,
@@ -26,8 +21,8 @@ import type { SonarTestProbeService } from "./test-probe.js"
 export { SonarTestProbe } from "./test-probe.js"
 
 type ScenarioRequest =
-  | ResearchRequest<ResearchConfig<object>>
-  | DeepResearchRequest<DeepResearchConfig<object>>
+  | ResearchRequest<AnyResearchConfig>
+  | DeepResearchRequest<AnyDeepResearchConfig>
 
 export class Scenario<Request extends ScenarioRequest = ScenarioRequest> {
   readonly request: Request
@@ -49,12 +44,31 @@ export class Scenario<Request extends ScenarioRequest = ScenarioRequest> {
   }
 }
 
-const tierOf = (request: ScenarioRequest): "research" | "deepResearch" =>
-  "research" in request ? "research" : "deepResearch"
+const researchBuiltIns = new Set([
+  "linkedin",
+  "title",
+  "x",
+  "github",
+  "domain",
+  "name",
+  "logo",
+  "colors",
+  "location",
+  "description",
+  "funding",
+])
 
-const configOf = (
-  request: ScenarioRequest
-): ResearchConfig<object> | DeepResearchConfig<object> => {
+const tierOf = (request: ScenarioRequest): "research" | "deepResearch" => {
+  // SAFETY: Every ScenarioRequest owns exactly these two object-shaped entity selectors.
+  const entities = [request.person, request.company] as readonly object[]
+  return entities.some(
+    (entity) => "research" in entity || Object.keys(entity).some((key) => researchBuiltIns.has(key))
+  )
+    ? "research"
+    : "deepResearch"
+}
+
+const configOf = (request: ScenarioRequest): AnyResearchConfig | AnyDeepResearchConfig => {
   const { seed: _seed, ...config } = request
   return config
 }
@@ -68,7 +82,7 @@ const identityOf = (request: ScenarioRequest) => {
   })
 }
 
-const scenarioStream = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+const scenarioStream = <const C extends AnyResearchConfig | AnyDeepResearchConfig>(
   scenario: Scenario,
   request: ScenarioRequest,
   requests: ScenarioRequest[],
@@ -101,13 +115,8 @@ const scenarioStream = <const C extends ResearchConfig<object> | DeepResearchCon
   )
 }
 
-function retrieve<const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
-  _hash: string,
-  config: ValidConfig<C>
-): Effect.Effect<SonarSnapshot<C>>
-function retrieve(_hash: string, config: ResearchConfig | DeepResearchConfig) {
-  return Effect.succeed(initialSnapshot(config))
-}
+const scenarioRetrieve = (_hash: string, config: AnyResearchConfig | AnyDeepResearchConfig) =>
+  Effect.succeed(initialSnapshot(config))
 
 export const scenarioLayer = (...scenarios: readonly Scenario[]) => {
   const requests: ScenarioRequest[] = []
@@ -118,34 +127,33 @@ export const scenarioLayer = (...scenarios: readonly Scenario[]) => {
     return scenarios.find((scenario) => identityOf(scenario.request) === identity)
   }
 
-  const research = <const C extends ResearchConfig<object>>(request: ValidResearchRequest<C>) => {
+  const research: SonarClientService["research"] = (request) => {
     const scenario = matching(request)
     return scenario
-      ? scenarioStream<C>(scenario, request, requests, () => {
+      ? scenarioStream(scenario, request, requests, () => {
           interruptions += 1
         })
       : Stream.fail(new RequestError({ message: "No matching research scenario" }))
   }
 
-  const deepResearch = <const C extends DeepResearchConfig<object>>(
-    request: ValidDeepResearchRequest<C>
-  ) => {
+  const deepResearch: SonarClientService["deepResearch"] = (request) => {
     const scenario = matching(request)
     return scenario
-      ? scenarioStream<C>(scenario, request, requests, () => {
+      ? scenarioStream(scenario, request, requests, () => {
           interruptions += 1
         })
       : Stream.fail(new RequestError({ message: "No matching deepResearch scenario" }))
   }
-
   const service: SonarClientService = {
     deepResearch,
     research,
-    retrieve,
+    // SAFETY: The deterministic helper preserves its exact config in initialSnapshot just like the
+    // overloaded public service contract.
+    retrieve: scenarioRetrieve as SonarClientService["retrieve"],
   }
   const probe: SonarTestProbeService = {
     interruptions: Effect.sync(() => interruptions),
-    requests: Effect.sync(() => [...requests]),
+    requests: Effect.sync((): readonly ScenarioRequest[] => [...requests]),
   }
 
   return Layer.merge(Layer.succeed(SonarClient, service), Layer.succeed(SonarTestProbe, probe))

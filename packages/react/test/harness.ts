@@ -41,12 +41,12 @@ type SnapshotController = {
 type StartedRequest =
   | {
       tier: "research"
-      request: ResearchRequest<ResearchConfig<object>>
+      request: ResearchRequest<ResearchConfig<object, object>>
       source: SnapshotController
     }
   | {
       tier: "deepResearch"
-      request: DeepResearchRequest<DeepResearchConfig<object>>
+      request: DeepResearchRequest<DeepResearchConfig<object, object>>
       source: SnapshotController
     }
 
@@ -66,6 +66,12 @@ type MalformedSnapshot = {
   readonly data: object
   readonly status: string
 }
+
+type FixtureEntity =
+  | ResearchConfig["person"]
+  | ResearchConfig["company"]
+  | DeepResearchConfig["person"]
+  | DeepResearchConfig["company"]
 
 const ClientError = Schema.Union([
   Schema.instanceOf(RequestError),
@@ -179,11 +185,20 @@ export class SnapshotSource<T> implements AsyncIterable<T> {
   }
 }
 
-const requestConfig = <C extends ResearchConfig<object> | DeepResearchConfig<object>>(
-  request: C & { readonly seed: SonarSeed }
-): C => request
+const requestConfig = <
+  C extends ResearchConfig<object, object> | DeepResearchConfig<object, object>,
+>(
+  request: object & { readonly seed: SonarSeed }
+): C => {
+  const { seed: _seed, ...config } = request
+  // SAFETY: The test service receives a request whose only operation-level property
+  // is seed; removing it recovers the exact config C used to type the request.
+  return config as C
+}
 
-const snapshotController = <C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+const snapshotController = <
+  C extends ResearchConfig<object, object> | DeepResearchConfig<object, object>,
+>(
   source: SnapshotSource<SonarSnapshot<C>>
 ): SnapshotController => ({
   complete: () => source.complete(),
@@ -196,17 +211,19 @@ const snapshotController = <C extends ResearchConfig<object> | DeepResearchConfi
   pushMalformed: (value) => source.pushMalformed(value),
 })
 
-const makeResearchStartedRequest = <C extends ResearchConfig<object>>(
+const makeResearchStartedRequest = <C extends ResearchConfig<object, object>>(
   request: ResearchRequest<C>,
   source: SnapshotSource<SonarSnapshot<C>>
 ): StartedRequest => ({ request, source: snapshotController(source), tier: "research" })
 
-const makeDeepResearchStartedRequest = <C extends DeepResearchConfig<object>>(
+const makeDeepResearchStartedRequest = <C extends DeepResearchConfig<object, object>>(
   request: DeepResearchRequest<C>,
   source: SnapshotSource<SonarSnapshot<C>>
 ): StartedRequest => ({ request, source: snapshotController(source), tier: "deepResearch" })
 
-const retrieveImpl = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+const retrieveImpl = <
+  const C extends ResearchConfig<object, object> | DeepResearchConfig<object, object>,
+>(
   _hash: string,
   config: C
 ) => Effect.succeed(initialSnapshot(config))
@@ -254,7 +271,7 @@ export const installHappyDOM = () => {
 export const createTestLayer = (options: ServiceOptions = {}) => {
   const recorder: ClientRecorder = { cancellations: 0, disposals: 0, starts: [] }
 
-  const researchImpl = <const C extends ResearchConfig<object>>(
+  const researchImpl = <const C extends ResearchConfig<object, object>>(
     request: ResearchRequest<C>
   ): Stream.Stream<SonarSnapshot<C>, SonarClientError> => {
     if (!isSonarSeed(request.seed)) {
@@ -277,9 +294,7 @@ export const createTestLayer = (options: ServiceOptions = {}) => {
   // to ResearchConfig; TypeScript expands SonarSnapshot<any> across both tiers.
   const research = researchImpl as SonarClientService["research"]
 
-  const deepResearch: SonarClientService["deepResearch"] = <
-    const C extends DeepResearchConfig<object>,
-  >(
+  const deepResearchImpl = <const C extends DeepResearchConfig<object, object>>(
     request: DeepResearchRequest<C>
   ): Stream.Stream<SonarSnapshot<C>, SonarClientError> => {
     if (!isSonarSeed(request.seed)) {
@@ -297,6 +312,9 @@ export const createTestLayer = (options: ServiceOptions = {}) => {
     }
     return Stream.fromAsyncIterable(source, toClientError)
   }
+  // SAFETY: deepResearchImpl is generic over every DeepResearchConfig and preserves
+  // C across its request and snapshot; the public validity wrapper only narrows inputs.
+  const deepResearch = deepResearchImpl as SonarClientService["deepResearch"]
 
   const service: SonarClientService = { deepResearch, research, retrieve }
   const scopedService = Effect.acquireRelease(Effect.succeed(service), () =>
@@ -312,7 +330,7 @@ export const createTestLayer = (options: ServiceOptions = {}) => {
 }
 
 const valueForKey = (key: string): boolean | string => {
-  if (key === "sellsToSMB" || key === "usesQuickBooks") {
+  if (key === "sellsToSMB") {
     return true
   }
   if (key === "linkedin") {
@@ -335,30 +353,43 @@ const resolvedField = (key: string): FixtureField => ({
 })
 
 const fixtureData = (
-  config: ResearchConfig<object> | DeepResearchConfig<object>,
+  config: ResearchConfig<object, object> | DeepResearchConfig<object, object>,
   resolution: "all" | "first"
 ) => {
   let resolvedOne = false
+  const field = (key: string): FixtureField => {
+    if (resolution === "all" || !resolvedOne) {
+      resolvedOne = true
+      return resolvedField(key)
+    }
+    return { status: "pending" }
+  }
   const fields = (keys: readonly string[]) => {
     const result: Record<string, FixtureField> = {}
     for (const key of keys) {
-      if (resolution === "all" || !resolvedOne) {
-        result[key] = resolvedField(key)
-        resolvedOne = true
-      } else {
-        result[key] = { status: "pending" }
-      }
+      result[key] = field(key)
     }
     return result
   }
-  const questions = "research" in config ? config.research : config.deepResearch
-  const person = { person: fields(config.person) }
-  const company = { company: fields(config.company) }
-  return { ...person, ...company, ...fields(Object.keys(questions ?? {})) }
+  const entityFields = (entity: FixtureEntity) => {
+    const result: Record<string, FixtureField | Record<string, FixtureField>> = {}
+    for (const key of Object.keys(entity)) {
+      result[key] =
+        key === "research" || key === "deepResearch"
+          ? fields(Object.keys(entity[key] ?? {}))
+          : field(key)
+    }
+    return result
+  }
+  // oxlint-disable-next-line sort-keys -- Fixtures preserve the public person-before-company order.
+  return {
+    person: entityFields(config.person),
+    company: entityFields(config.company),
+  }
 }
 
 export const terminalSnapshot = <
-  const C extends ResearchConfig<object> | DeepResearchConfig<object>,
+  const C extends ResearchConfig<object, object> | DeepResearchConfig<object, object>,
 >(
   config: C
 ): SonarSnapshot<C> =>
@@ -370,7 +401,7 @@ export const terminalSnapshot = <
   }) as SonarSnapshot<C>
 
 export const partialSnapshot = <
-  const C extends ResearchConfig<object> | DeepResearchConfig<object>,
+  const C extends ResearchConfig<object, object> | DeepResearchConfig<object, object>,
 >(
   config: C
 ): SonarSnapshot<C> =>

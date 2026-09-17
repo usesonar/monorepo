@@ -4,7 +4,13 @@ import { describe, expect, test } from "bun:test"
 
 import { isNetworkError } from "ky"
 
-import { SonarStreamError, createSonar, streamDeepResearch, streamResearch } from "../src/index.ts"
+import {
+  SonarStreamError,
+  compileResearchRequest,
+  createSonar,
+  streamDeepResearch,
+  streamResearch,
+} from "../src/index.ts"
 import type { SonarEvent } from "../src/index.ts"
 import {
   collectStream,
@@ -38,17 +44,26 @@ const resolvedTitle = {
 const fragmentedResearchRequest = {
   seed: { fullName: "Ada Lovelace", email: "ada@example.com" },
   ttl: "12h",
-  person: ["title"],
-  company: ["location"],
-  research: { accountSignals: "Which buying signals are publicly visible?" },
+  person: {
+    title: true,
+    research: {
+      accountSignals: {
+        description: "Which buying signals are publicly visible?",
+        type: "object",
+      },
+    },
+  },
+  company: { location: true },
 } as const
 
 const fragmentedPendingSnapshot = {
   status: "pending",
   data: {
-    person: { title: { status: "pending" } },
+    person: {
+      title: { status: "pending" },
+      research: { accountSignals: { status: "pending" } },
+    },
     company: { location: { status: "pending" } },
-    accountSignals: { status: "pending" },
   },
 } as const
 
@@ -154,7 +169,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       "id: 2\revent: field\r",
       'data: {"path":"company.location",\r',
       `data: ${JSON.stringify(resolvedLocation).slice(1)}\r\r`,
-      `id: 3\nevent: field\ndata: ${JSON.stringify({ path: "accountSignals", ...resolvedSignals })}\n\n`,
+      `id: 3\nevent: field\ndata: ${JSON.stringify({ path: "person.research.accountSignals", ...resolvedSignals })}\n\n`,
       'id: 4\nevent: complete\ndata: {"hash":"sonar_hash_123"}\n\n',
     ].join("")
     const bytes = new TextEncoder().encode(raw)
@@ -199,12 +214,12 @@ describe("V-API-03 SSE transport and protocol", () => {
     expect(requests[0]?.headers.get("x-research-sse-instance")).toBe("preserved")
     expect(requests[0]?.headers.get("x-research-sse-hook")).toBe("ran")
     expect(hookCalls).toBe(1)
-    expect(await requests[0]?.json()).toEqual(fragmentedResearchRequest)
+    expect(await requests[0]?.json()).toEqual(compileResearchRequest(fragmentedResearchRequest))
     expect(events).toEqual([
       { id: "0", type: "snapshot", snapshot: fragmentedPendingSnapshot },
       { id: "1", type: "field", path: "person.title", field: resolvedTitle },
       { id: "2", type: "field", path: "company.location", field: resolvedLocation },
-      { id: "3", type: "field", path: "accountSignals", field: resolvedSignals },
+      { id: "3", type: "field", path: "person.research.accountSignals", field: resolvedSignals },
       { id: "4", type: "complete", hash: "sonar_hash_123" },
     ])
   })
@@ -215,16 +230,15 @@ describe("V-API-03 SSE transport and protocol", () => {
       status: "pending",
       data: {
         person: { phone: { status: "pending" } },
-        company: { legalName: { status: "pending" } },
-        regulatoryStatus: { status: "pending" },
+        company: {
+          legalName: { status: "pending" },
+          deepResearch: { regulatoryStatus: { status: "pending" } },
+        },
       },
     } as const
     const phone = resolvedField("+1-202-555-0100")
     const legalName = resolvedField("Example Analytics Ltd")
-    const regulatoryStatus = resolvedField({
-      registered: true,
-      jurisdictions: ["GB"],
-    })
+    const regulatoryStatus = resolvedField("Registered in GB")
     let hookCalls = 0
     const client = createSonar({
       baseURL: "https://api.example.test/",
@@ -251,7 +265,10 @@ describe("V-API-03 SSE transport and protocol", () => {
               encodeSSE("snapshot", "0", deepSnapshot),
               encodeSSE("field", "1", { path: "person.phone", ...phone }),
               encodeSSE("field", "2", { path: "company.legalName", ...legalName }),
-              encodeSSE("field", "3", { path: "regulatoryStatus", ...regulatoryStatus }),
+              encodeSSE("field", "3", {
+                path: "company.deepResearch.regulatoryStatus",
+                ...regulatoryStatus,
+              }),
               encodeSSE("complete", "4", { hash: "deep_hash_123" })
             ),
           ])
@@ -265,7 +282,12 @@ describe("V-API-03 SSE transport and protocol", () => {
       { id: "0", type: "snapshot", snapshot: deepSnapshot },
       { id: "1", type: "field", path: "person.phone", field: phone },
       { id: "2", type: "field", path: "company.legalName", field: legalName },
-      { id: "3", type: "field", path: "regulatoryStatus", field: regulatoryStatus },
+      {
+        id: "3",
+        type: "field",
+        path: "company.deepResearch.regulatoryStatus",
+        field: regulatoryStatus,
+      },
       { id: "4", type: "complete", hash: "deep_hash_123" },
     ])
     expect(requests).toHaveLength(1)
@@ -279,8 +301,10 @@ describe("V-API-03 SSE transport and protocol", () => {
   })
 
   test("requires a full all-pending snapshot as the first event", async () => {
-    const statuses = Object.values(pendingResearchSnapshot.data).flatMap((slot) =>
-      "status" in slot ? [slot.status] : Object.values(slot).map((field) => field.status)
+    const statuses = Object.values(pendingResearchSnapshot.data).flatMap((entity) =>
+      Object.entries(entity).flatMap(([key, value]) =>
+        key === "research" ? Object.values(value).map((field) => field.status) : [value.status]
+      )
     )
     expect(statuses).not.toHaveLength(0)
     expect(statuses.every((status) => status === "pending")).toBe(true)
@@ -295,9 +319,8 @@ describe("V-API-03 SSE transport and protocol", () => {
   })
 
   test("requires the initial snapshot leaves to exactly match the request", async () => {
-    expect(Object.keys(minimalPendingResearchSnapshot.data)).toEqual([
-      "person",
-      "company",
+    expect(Object.keys(minimalPendingResearchSnapshot.data)).toEqual(["person", "company"])
+    expect(Object.keys(minimalPendingResearchSnapshot.data.person.research)).toEqual([
       "accountSignals",
     ])
 
@@ -307,7 +330,6 @@ describe("V-API-03 SSE transport and protocol", () => {
         data: {
           person: {},
           company: minimalPendingResearchSnapshot.data.company,
-          accountSignals: { status: "pending" },
         },
       },
       {
@@ -316,9 +338,9 @@ describe("V-API-03 SSE transport and protocol", () => {
           person: {
             title: { status: "pending" },
             phone: { status: "pending" },
+            research: minimalPendingResearchSnapshot.data.person.research,
           },
           company: minimalPendingResearchSnapshot.data.company,
-          accountSignals: { status: "pending" },
         },
       },
       {
@@ -326,7 +348,6 @@ describe("V-API-03 SSE transport and protocol", () => {
         data: {
           person: minimalPendingResearchSnapshot.data.person,
           company: {},
-          accountSignals: { status: "pending" },
         },
       },
       {
@@ -337,31 +358,36 @@ describe("V-API-03 SSE transport and protocol", () => {
             name: { status: "pending" },
             legalName: { status: "pending" },
           },
-          accountSignals: { status: "pending" },
         },
       },
       {
         ...minimalPendingResearchSnapshot,
         data: {
-          person: minimalPendingResearchSnapshot.data.person,
+          person: { title: { status: "pending" } },
           company: minimalPendingResearchSnapshot.data.company,
         },
       },
       {
         ...minimalPendingResearchSnapshot,
         data: {
-          person: minimalPendingResearchSnapshot.data.person,
+          person: {
+            ...minimalPendingResearchSnapshot.data.person,
+            research: {
+              ...minimalPendingResearchSnapshot.data.person.research,
+              unrequestedAnswer: { status: "pending" },
+            },
+          },
           company: minimalPendingResearchSnapshot.data.company,
-          accountSignals: { status: "pending" },
-          unrequestedAnswer: { status: "pending" },
         },
       },
       {
         ...minimalPendingResearchSnapshot,
         data: {
-          person: { title: resolvedTitle },
+          person: {
+            title: resolvedTitle,
+            research: minimalPendingResearchSnapshot.data.person.research,
+          },
           company: minimalPendingResearchSnapshot.data.company,
-          accountSignals: { status: "pending" },
         },
       },
     ]
@@ -372,19 +398,26 @@ describe("V-API-03 SSE transport and protocol", () => {
   test("requires requested custom answers to be own initial snapshot properties", async () => {
     const prototypeKeyRequest = {
       ...minimalResearchRequest,
-      research: { toString: "What is the public description?" },
+      person: {
+        title: true,
+        research: {
+          toString: { description: "What is the public description?", type: "string" },
+        },
+      },
     } as const
     const sameCountWrongKeySnapshot = {
       ...minimalPendingResearchSnapshot,
       data: {
-        person: minimalPendingResearchSnapshot.data.person,
+        person: {
+          title: { status: "pending" },
+          research: { foo: { status: "pending" } },
+        },
         company: minimalPendingResearchSnapshot.data.company,
-        foo: { status: "pending" },
       },
     } as const
-    expect(Object.keys(sameCountWrongKeySnapshot.data)).toHaveLength(3)
-    expect(Object.hasOwn(sameCountWrongKeySnapshot.data, "toString")).toBe(false)
-    expect("toString" in sameCountWrongKeySnapshot.data).toBe(true)
+    expect(Object.keys(sameCountWrongKeySnapshot.data.person.research)).toHaveLength(1)
+    expect(Object.hasOwn(sameCountWrongKeySnapshot.data.person.research, "toString")).toBe(false)
+    expect("toString" in sameCountWrongKeySnapshot.data.person.research).toBe(true)
 
     await expectInitialSnapshotFailure(sameCountWrongKeySnapshot, prototypeKeyRequest)
   })
@@ -409,7 +442,7 @@ describe("V-API-03 SSE transport and protocol", () => {
     const seed = { fullName: "Ada Lovelace", email: "ada@example.com" } as const
     const cases = [
       {
-        request: { seed, ttl: "12h", person: ["title"], company: [], research: {} },
+        request: { seed, ttl: "12h", person: { title: true }, company: {} },
         snapshot: {
           status: "pending",
           data: { person: { title: { status: "pending" } }, company: {} },
@@ -418,7 +451,7 @@ describe("V-API-03 SSE transport and protocol", () => {
         field: resolvedField(42),
       },
       {
-        request: { seed, ttl: "12h", person: ["linkedin"], company: [], research: {} },
+        request: { seed, ttl: "12h", person: { linkedin: true }, company: {} },
         snapshot: {
           status: "pending",
           data: { person: { linkedin: { status: "pending" } }, company: {} },
@@ -427,7 +460,7 @@ describe("V-API-03 SSE transport and protocol", () => {
         field: resolvedField("not a URL"),
       },
       {
-        request: { seed, ttl: "12h", person: [], company: ["logo"], research: {} },
+        request: { seed, ttl: "12h", person: {}, company: { logo: true } },
         snapshot: {
           status: "pending",
           data: { person: {}, company: { logo: { status: "pending" } } },
@@ -436,7 +469,7 @@ describe("V-API-03 SSE transport and protocol", () => {
         field: resolvedField("/relative-logo.png"),
       },
       {
-        request: { seed, ttl: "12h", person: [], company: ["name"], research: {} },
+        request: { seed, ttl: "12h", person: {}, company: { name: true } },
         snapshot: {
           status: "pending",
           data: { person: {}, company: { name: { status: "pending" } } },
@@ -454,7 +487,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
       encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" })
     )
     const invalidTrailingChunks = [
@@ -481,7 +514,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
       encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" })
     )
     const client = streamClient(() =>
@@ -512,7 +545,7 @@ describe("V-API-03 SSE transport and protocol", () => {
           encodeSSE("snapshot", "1", minimalPendingResearchSnapshot),
           encodeSSE("field", "2", { path: "person.title", ...resolvedTitle }),
           encodeSSE("field", "3", { path: "company.name", ...resolvedName }),
-          encodeSSE("field", "4", { path: "accountSignals", ...resolvedSignals }),
+          encodeSSE("field", "4", { path: "person.research.accountSignals", ...resolvedSignals }),
           encodeSSE("complete", "5", { hash: "minimal_hash_123" })
         ),
       ])
@@ -533,7 +566,10 @@ describe("V-API-03 SSE transport and protocol", () => {
               encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
               encodeSSE("field", invalidId, { path: "person.title", ...resolvedTitle }),
               encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-              encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+              encodeSSE("field", "3", {
+                path: "person.research.accountSignals",
+                ...resolvedSignals,
+              }),
               encodeSSE("complete", "4", { hash: "minimal_hash_123" })
             ),
           ])
@@ -553,7 +589,7 @@ describe("V-API-03 SSE transport and protocol", () => {
           encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
           encodeSSE("field", "2", { path: "person.title", ...resolvedTitle }),
           encodeSSE("field", "3", { path: "company.name", ...resolvedName }),
-          encodeSSE("field", "4", { path: "accountSignals", ...resolvedSignals }),
+          encodeSSE("field", "4", { path: "person.research.accountSignals", ...resolvedSignals }),
           encodeSSE("complete", "5", { hash: "minimal_hash_123" })
         ),
       ])
@@ -623,7 +659,7 @@ describe("V-API-03 SSE transport and protocol", () => {
     const reconnectChunk = concatenateBytes(
       reorderedTitleReplay,
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" })
     )
     const client = streamClient(() => {
@@ -638,7 +674,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       { id: "0", type: "snapshot", snapshot: minimalPendingResearchSnapshot },
       { id: "1", type: "field", path: "person.title", field: resolvedTitle },
       { id: "2", type: "field", path: "company.name", field: resolvedName },
-      { id: "3", type: "field", path: "accountSignals", field: resolvedSignals },
+      { id: "3", type: "field", path: "person.research.accountSignals", field: resolvedSignals },
       { id: "4", type: "complete", hash: "minimal_hash_123" },
     ])
     expect(fetchCalls).toBe(2)
@@ -662,7 +698,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       reorderedTitleReplay,
       reorderedTitleReplay,
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" })
     )
     const client = streamClient(() => {
@@ -684,7 +720,7 @@ describe("V-API-03 SSE transport and protocol", () => {
     const reconnectChunk = concatenateBytes(
       encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" }),
       encodeSSE("snapshot", "0", minimalPendingResearchSnapshot)
     )
@@ -702,7 +738,10 @@ describe("V-API-03 SSE transport and protocol", () => {
     const snapshot = encodeSSE("snapshot", "0", minimalPendingResearchSnapshot)
     const title = encodeSSE("field", "1", { path: "person.title", ...resolvedTitle })
     const name = encodeSSE("field", "2", { path: "company.name", ...resolvedName })
-    const signals = encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals })
+    const signals = encodeSSE("field", "3", {
+      path: "person.research.accountSignals",
+      ...resolvedSignals,
+    })
     const complete = encodeSSE("complete", "4", { hash: "sonar_hash_123" })
     const bodies = [
       concatenateBytes(snapshot, title),
@@ -726,7 +765,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       { id: "0", type: "snapshot", snapshot: minimalPendingResearchSnapshot },
       { id: "1", type: "field", path: "person.title", field: resolvedTitle },
       { id: "2", type: "field", path: "company.name", field: resolvedName },
-      { id: "3", type: "field", path: "accountSignals", field: resolvedSignals },
+      { id: "3", type: "field", path: "person.research.accountSignals", field: resolvedSignals },
       { id: "4", type: "complete", hash: "sonar_hash_123" },
     ])
     expect(requests).toHaveLength(4)
@@ -785,7 +824,7 @@ describe("V-API-03 SSE transport and protocol", () => {
     const completedReconnectBody = concatenateBytes(
       encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "sonar_hash_123" })
     )
     const client = createSonar({
@@ -820,7 +859,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       { id: "0", type: "snapshot", snapshot: minimalPendingResearchSnapshot },
       { id: "1", type: "field", path: "person.title", field: resolvedTitle },
       { id: "2", type: "field", path: "company.name", field: resolvedName },
-      { id: "3", type: "field", path: "accountSignals", field: resolvedSignals },
+      { id: "3", type: "field", path: "person.research.accountSignals", field: resolvedSignals },
       { id: "4", type: "complete", hash: "sonar_hash_123" },
     ])
     expect(requests).toHaveLength(3)
@@ -980,7 +1019,7 @@ describe("V-API-03 SSE transport and protocol", () => {
     const snapshot = `id: 0\nevent: snapshot\ndata: ${JSON.stringify(minimalPendingResearchSnapshot)}\n\n`
     const title = `id: 1\nevent: field\ndata: ${JSON.stringify({ path: "person.title", ...resolvedTitle })}\n\n`
     const name = `id: 2\nevent: field\ndata: ${JSON.stringify({ path: "company.name", ...resolvedName })}\n\n`
-    const signals = `id: 3\nevent: field\ndata: ${JSON.stringify({ path: "accountSignals", ...resolvedSignals })}\n\n`
+    const signals = `id: 3\nevent: field\ndata: ${JSON.stringify({ path: "person.research.accountSignals", ...resolvedSignals })}\n\n`
     const terminalPrefix = `${snapshot}${title}${name}${signals}`
     const complete = 'id: 4\nevent: complete\ndata: {"hash":"sonar_hash_123"}\n\n'
     const cases = [
@@ -998,7 +1037,7 @@ describe("V-API-03 SSE transport and protocol", () => {
 
   test("rejects an oversized SSE event", async () => {
     const hugeField = {
-      path: "accountSignals",
+      path: "person.research.accountSignals",
       status: "resolved",
       value: "x".repeat(1024 * 1024 + 1),
       confidence: 0.5,
@@ -1014,7 +1053,7 @@ describe("V-API-03 SSE transport and protocol", () => {
   test("measures the SSE event limit in UTF-8 bytes rather than JavaScript characters", async () => {
     const oneMiB = 1024 * 1024
     const multibyteField = {
-      path: "accountSignals",
+      path: "person.research.accountSignals",
       status: "resolved",
       value: "é".repeat(600_000),
       confidence: 0.5,
@@ -1033,7 +1072,7 @@ describe("V-API-03 SSE transport and protocol", () => {
     const encoder = new TextEncoder()
     const oneMiB = 1024 * 1024
     const emptyField = {
-      path: "accountSignals",
+      path: "person.research.accountSignals",
       status: "resolved",
       value: "",
       confidence: 0.5,
@@ -1086,7 +1125,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
       encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" })
     )
 
@@ -1116,7 +1155,7 @@ describe("V-API-03 SSE transport and protocol", () => {
       encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
       encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
       encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-      encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+      encodeSSE("field", "3", { path: "person.research.accountSignals", ...resolvedSignals }),
       encodeSSE("complete", "4", { hash: "minimal_hash_123" })
     )
     const client = createSonar({
@@ -1169,7 +1208,10 @@ describe("V-API-03 SSE transport and protocol", () => {
               encodeSSE("snapshot", "0", minimalPendingResearchSnapshot),
               encodeSSE("field", "1", { path: "person.title", ...resolvedTitle }),
               encodeSSE("field", "2", { path: "company.name", ...resolvedName }),
-              encodeSSE("field", "3", { path: "accountSignals", ...resolvedSignals }),
+              encodeSSE("field", "3", {
+                path: "person.research.accountSignals",
+                ...resolvedSignals,
+              }),
               encodeSSE("complete", "4", { hash: "sonar_hash_123" })
             ),
           ])

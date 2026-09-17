@@ -1,5 +1,9 @@
 // oxlint-disable sort-keys -- Verifier fixtures preserve the public person, company, and catalog order.
 
+import { z } from "zod"
+
+import { compileResearchRequest } from "../src/schemas.ts"
+
 type FixtureJSON = null | boolean | number | string | FixtureJSON[] | { [key: string]: FixtureJSON }
 
 export const researchRequest = {
@@ -10,12 +14,29 @@ export const researchRequest = {
     context: { source: "verification", attempts: 1 },
   },
   ttl: "7d",
-  person: ["linkedin", "title", "x", "github"],
-  company: ["domain", "name", "logo", "colors", "location", "description", "funding"],
-  research: {
-    accountSignals: "Which buying signals are publicly visible?",
+  person: {
+    linkedin: true,
+    title: true,
+    x: true,
+    github: true,
+    research: {
+      accountSignals: z
+        .object({ intent: z.string(), evidence: z.array(z.string()) })
+        .describe("Which buying signals are publicly visible?"),
+    },
+  },
+  company: {
+    domain: true,
+    name: true,
+    logo: true,
+    colors: true,
+    location: true,
+    description: true,
+    funding: true,
   },
 } as const
+
+export const researchWireRequest = compileResearchRequest(researchRequest)
 
 export const deepResearchRequest = {
   seed: {
@@ -25,27 +46,39 @@ export const deepResearchRequest = {
     email: "ada@example.com",
   },
   ttl: "12h",
-  person: ["phone"],
-  company: ["legalName"],
-  deepResearch: {
-    regulatoryStatus: "What is the company's current regulatory status?",
+  person: { phone: true },
+  company: {
+    legalName: true,
+    deepResearch: {
+      regulatoryStatus: "What is the company's current regulatory status?",
+    },
   },
 } as const
 
 export const minimalResearchRequest = {
   seed: { fullName: "Ada Lovelace", email: "ada@example.com" },
   ttl: "12h",
-  person: ["title"],
-  company: ["name"],
-  research: { accountSignals: "Which buying signals are publicly visible?" },
+  person: {
+    title: true,
+    research: {
+      accountSignals: z
+        .object({ intent: z.string(), evidence: z.array(z.string()) })
+        .describe("Which buying signals are publicly visible?"),
+    },
+  },
+  company: { name: true },
 } as const
+
+export const minimalResearchWireRequest = compileResearchRequest(minimalResearchRequest)
 
 export const minimalPendingResearchSnapshot = {
   status: "pending",
   data: {
-    person: { title: { status: "pending" } },
+    person: {
+      title: { status: "pending" },
+      research: { accountSignals: { status: "pending" } },
+    },
     company: { name: { status: "pending" } },
-    accountSignals: { status: "pending" },
   },
 } as const
 
@@ -70,6 +103,7 @@ export const pendingResearchSnapshot = {
       title: { status: "pending" },
       x: { status: "pending" },
       github: { status: "pending" },
+      research: { accountSignals: { status: "pending" } },
     },
     company: {
       domain: { status: "pending" },
@@ -80,7 +114,6 @@ export const pendingResearchSnapshot = {
       description: { status: "pending" },
       funding: { status: "pending" },
     },
-    accountSignals: { status: "pending" },
   },
 } as const
 
@@ -104,6 +137,15 @@ export const completeResearchSnapshot = {
       },
       x: { status: "notFound", reason: "providerEmpty" },
       github: { status: "notFound" },
+      research: {
+        accountSignals: {
+          status: "resolved",
+          value: { intent: "high", evidence: ["Hiring finance operators"] },
+          confidence: 0.73,
+          sources: ["https://example.com/jobs"],
+          resolvedAt: "2026-08-25T20:00:07.000Z",
+        },
+      },
     },
     company: {
       domain: {
@@ -149,13 +191,6 @@ export const completeResearchSnapshot = {
         sources: ["https://example.com/funding"],
         resolvedAt: "2026-08-25T20:00:06.000Z",
       },
-    },
-    accountSignals: {
-      status: "resolved",
-      value: { intent: "high", evidence: ["Hiring finance operators"] },
-      confidence: 0.73,
-      sources: ["https://example.com/jobs"],
-      resolvedAt: "2026-08-25T20:00:07.000Z",
     },
   },
 } as const

@@ -2,16 +2,15 @@ import { describe, expect, test } from "bun:test"
 
 import { Effect, Stream } from "effect"
 
-import { SonarClient, initialSnapshot } from "./index.js"
+import { SonarClient } from "./index.js"
 import type { ResearchConfig, ResearchRequest } from "./index.js"
 import { Scenario, SonarTestProbe, scenarioLayer } from "./testing.js"
 
 /* eslint-disable react-hooks/rules-of-hooks -- Context.Service.use retrieves an Effect service; it is not a React Hook. */
 
 const config = {
-  company: [],
-  person: ["title"],
-  research: {},
+  company: {},
+  person: { title: true },
   ttl: "12h",
 } as const satisfies ResearchConfig
 
@@ -46,7 +45,10 @@ describe("@usesonar/effect/testing", () => {
     const scenario = Scenario.make({ events: [terminalTitle, completion], request })
     const snapshots = [...(await collect(scenarioLayer(scenario)))]
 
-    expect(snapshots[0]).toEqual(initialSnapshot(config))
+    expect(snapshots[0]).toEqual({
+      data: { company: {}, person: { title: { status: "pending" } } },
+      status: "pending",
+    })
     expect(snapshots.at(-1)).toMatchObject({
       data: { person: { title: terminalTitle.field } },
       status: "complete",

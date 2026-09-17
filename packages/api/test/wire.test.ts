@@ -2,8 +2,11 @@
 
 import { describe, expect, test } from "bun:test"
 
+import { z } from "zod"
+
 import {
   CompleteEvent,
+  compileResearchRequest,
   DeepResearchRequest,
   Field,
   FieldEvent,
@@ -16,6 +19,7 @@ import {
   SonarSnapshot,
   TTL,
 } from "../src/index.ts"
+import type { StandardJSONSchemaV1 } from "../src/index.ts"
 import {
   completeResearchSnapshot,
   completeResearchResponse,
@@ -23,6 +27,7 @@ import {
   pendingResearchSnapshot,
   pendingResearchResponse,
   researchRequest,
+  researchWireRequest,
 } from "./fixtures.ts"
 
 const resolvedFieldEvent = (path: string, value: JSONValue) => ({
@@ -218,37 +223,43 @@ describe("V-API-01 public wire schemas", () => {
   })
 
   test("enforces the research and deepResearch catalogs at runtime", () => {
-    expect(ResearchRequest.safeParse(researchRequest).success).toBe(true)
+    expect(ResearchRequest.safeParse(researchWireRequest).success).toBe(true)
     expect(DeepResearchRequest.safeParse(deepResearchRequest).success).toBe(true)
 
     const invalidRequests = [
       {
         schema: ResearchRequest,
-        value: { ...researchRequest, person: ["phone"] },
+        value: { ...researchWireRequest, person: { phone: true } },
       },
       {
         schema: ResearchRequest,
-        value: { ...researchRequest, company: ["legalName"] },
+        value: { ...researchWireRequest, company: { legalName: true } },
       },
       {
         schema: ResearchRequest,
-        value: { ...researchRequest, deepResearch: { forbidden: "wrong tier" } },
+        value: {
+          ...researchWireRequest,
+          person: { ...researchWireRequest.person, deepResearch: { forbidden: "wrong tier" } },
+        },
       },
       {
         schema: DeepResearchRequest,
-        value: { ...deepResearchRequest, person: ["title"] },
+        value: { ...deepResearchRequest, person: { title: true } },
       },
       {
         schema: DeepResearchRequest,
-        value: { ...deepResearchRequest, company: ["name"] },
+        value: { ...deepResearchRequest, company: { name: true } },
       },
       {
         schema: DeepResearchRequest,
-        value: { ...deepResearchRequest, research: { forbidden: "wrong tier" } },
+        value: {
+          ...deepResearchRequest,
+          company: { ...deepResearchRequest.company, research: { forbidden: "wrong tier" } },
+        },
       },
       {
         schema: ResearchRequest,
-        value: { ...researchRequest, person: ["title", "title"] },
+        value: { ...researchWireRequest, person: { title: false } },
       },
     ]
 
@@ -274,17 +285,101 @@ describe("V-API-01 public wire schemas", () => {
 
     for (const key of validKeys) {
       expect(
-        ResearchRequest.safeParse({ ...researchRequest, research: { [key]: "Question?" } }).success
+        ResearchRequest.safeParse({
+          ...researchWireRequest,
+          person: {
+            ...researchWireRequest.person,
+            research: { [key]: { description: "Question?", type: "string" } },
+          },
+        }).success
       ).toBe(true)
     }
     for (const key of invalidKeys) {
       expect(
-        ResearchRequest.safeParse({ ...researchRequest, research: { [key]: "Question?" } }).success
+        ResearchRequest.safeParse({
+          ...researchWireRequest,
+          person: {
+            ...researchWireRequest.person,
+            research: { [key]: { description: "Question?", type: "string" } },
+          },
+        }).success
       ).toBe(false)
     }
     expect(
-      ResearchRequest.safeParse({ ...researchRequest, research: { validKey: "   " } }).success
+      ResearchRequest.safeParse({
+        ...researchWireRequest,
+        person: {
+          ...researchWireRequest.person,
+          research: { validKey: { description: "   ", type: "string" } },
+        },
+      }).success
     ).toBe(false)
+  })
+
+  test("compiles only described JSON Schema-capable research validators", () => {
+    let inputConversions = 0
+    let outputConversions = 0
+    const standard: StandardJSONSchemaV1<unknown, string> = {
+      "~standard": {
+        version: 1,
+        vendor: "fixture",
+        jsonSchema: {
+          input: () => {
+            inputConversions += 1
+            return { description: "Wrong direction", type: "string" }
+          },
+          output: () => {
+            outputConversions += 1
+            return { description: "What changed recently?", type: "string" }
+          },
+        },
+      },
+    }
+    const compiled = compileResearchRequest({
+      seed: researchRequest.seed,
+      ttl: researchRequest.ttl,
+      person: {
+        title: true,
+        research: {
+          typed: z.object({ signal: z.string() }).describe("Which signal is strongest?"),
+          raw: { description: "What is the public narrative?", type: "string" },
+        },
+      },
+      company: { research: { standard } },
+    })
+
+    expect(compiled.person.research?.typed.description).toBe("Which signal is strongest?")
+    expect(compiled.person.research?.raw).toEqual({
+      description: "What is the public narrative?",
+      type: "string",
+    })
+    expect(compiled.company.research?.standard.description).toBe("What changed recently?")
+    expect(inputConversions).toBe(0)
+    expect(outputConversions).toBe(1)
+
+    const invalidValues = [
+      z.string(),
+      { type: "string" },
+      { description: "   ", type: "string" },
+      {
+        "~standard": {
+          version: 1,
+          vendor: "schema-only",
+          validate: <Value>(value: Value) => ({ value }),
+        },
+      },
+    ]
+    for (const invalid of invalidValues) {
+      expect(() =>
+        // SAFETY: Invalid validator fixtures intentionally bypass the authored compile-time contract.
+        compileResearchRequest({
+          seed: researchRequest.seed,
+          ttl: researchRequest.ttl,
+          person: { research: { invalid } },
+          company: {},
+        } as never)
+      ).toThrow()
+    }
   })
 
   test("Field has exactly the four specified states", () => {
@@ -373,16 +468,13 @@ describe("V-API-01 public wire schemas", () => {
     }
   })
 
-  test("decodes pending and complete snapshots with custom answers at top level", () => {
+  test("decodes pending and complete snapshots with entity-owned answer namespaces", () => {
     expect(SonarSnapshot.safeParse(pendingResearchSnapshot).success).toBe(true)
     expect(SonarSnapshot.safeParse(completeResearchSnapshot).success).toBe(true)
     expect(SonarResponse.safeParse(pendingResearchResponse).success).toBe(true)
     expect(SonarResponse.safeParse(completeResearchResponse).success).toBe(true)
-    expect(Object.keys(pendingResearchSnapshot.data).slice(0, 3)).toEqual([
-      "person",
-      "company",
-      "accountSignals",
-    ])
+    expect(Object.keys(pendingResearchSnapshot.data)).toEqual(["person", "company"])
+    expect(Object.keys(pendingResearchSnapshot.data.person.research)).toEqual(["accountSignals"])
 
     const contradictory = {
       ...pendingResearchSnapshot,
@@ -445,7 +537,10 @@ describe("V-API-01 public wire schemas", () => {
       resolvedFieldEvent("company.colors", ["#112233", "#ffffff"]),
       resolvedFieldEvent("company.location", { city: "London", remote: true }),
       resolvedFieldEvent("company.funding", { round: "seed", amount: 1_000_000 }),
-      resolvedFieldEvent("accountSignals", { intent: "high", evidence: ["public"] }),
+      resolvedFieldEvent("person.research.accountSignals", {
+        intent: "high",
+        evidence: ["public"],
+      }),
     ]
 
     for (const event of mismatchedEvents) {

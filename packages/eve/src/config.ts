@@ -1,4 +1,8 @@
-/* eslint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- Factory arguments are untrusted JavaScript values, so this module validates their exact runtime shape before any execution. */
+/* eslint-disable anti-slop/no-chained-type-assertions, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- Factory arguments are untrusted JavaScript values, so this module validates their exact runtime shape before any execution. */
+import { DeepResearchRequest, compileResearchRequest } from "@usesonar/effect"
+import type { DeepResearchConfig, ResearchConfig } from "@usesonar/effect"
+import { Schema } from "effect"
+
 import {
   deepResearchCompanyFields,
   deepResearchPersonFields,
@@ -17,7 +21,7 @@ import type {
 export const isDynamicConfig = (
   config: ResearchFactoryConfig | DeepResearchFactoryConfig
 ): config is ResearchDynamicConfig | DeepResearchDynamicConfig =>
-  Object.hasOwn(config, "dynamic") && config.dynamic === true
+  Object.getOwnPropertyDescriptor(config, "dynamic")?.value === true
 
 const ttlPattern = /^(?<amount>\d+)(?<unit>ms|s|m|h|d|w)$/u
 const minimumTTL = 12 * 3_600_000
@@ -120,40 +124,11 @@ const assertTTL = (ttl: unknown) => {
   return ttl
 }
 
-const snapshotFields = <Field extends string>(
-  fields: unknown,
-  catalog: readonly Field[],
-  slot: "person" | "company"
-): readonly Field[] => {
-  if (!Array.isArray(fields)) {
-    throw new TypeError(`Sonar ${slot} selection must be an array`)
-  }
-  const snapshot: unknown[] = []
-  for (let index = 0; index < fields.length; index += 1) {
-    if (!Object.hasOwn(fields, index)) {
-      throw new TypeError(`Sonar ${slot} selection must not contain sparse slots`)
-    }
-    snapshot.push(fields[index])
-  }
-  if (new Set(snapshot).size !== snapshot.length) {
-    throw new TypeError(`Sonar ${slot} selection must not contain duplicates`)
-  }
-  const validated: Field[] = []
-  for (const field of snapshot) {
-    if (typeof field !== "string" || !catalog.some((candidate) => candidate === field)) {
-      throw new TypeError(`${String(field)} is not available on this Sonar tier`)
-    }
-    // SAFETY: The catalog comparison above proves the stable snapshot value is this tier's Field.
-    validated.push(field as Field)
-  }
-  return Object.freeze(validated)
-}
-
-const normalizedQuestions = (questions: unknown, namespace: "research" | "deepResearch") => {
+const snapshotQuestions = (questions: unknown, namespace: "research" | "deepResearch") => {
   if (!isPlainObject(questions)) {
     throw new TypeError(`Sonar ${namespace} questions must be an object`)
   }
-  const normalized: Record<string, string> = {}
+  const snapshot: Record<string, unknown> = {}
   for (const key of Reflect.ownKeys(questions)) {
     if (typeof key !== "string") {
       throw new TypeError(`Invalid custom answer key: ${String(key)}`)
@@ -166,23 +141,56 @@ const normalizedQuestions = (questions: unknown, namespace: "research" | "deepRe
     if (!customKeyPattern.test(key) || reservedKeys.has(key)) {
       throw new TypeError(`Invalid custom answer key: ${key}`)
     }
-    if (typeof question !== "string" || question.trim().length === 0) {
-      throw new TypeError(`Question ${key} must be non-empty`)
-    }
-    normalized[key] = question.trim()
+    snapshot[key] = question
   }
-  return Object.freeze(normalized)
+  return Object.freeze(snapshot)
 }
 
-const assertSelection = (
-  person: readonly unknown[],
-  company: readonly unknown[],
-  questions: Readonly<Record<string, string>>
+const snapshotEntity = (
+  value: unknown,
+  slot: "person" | "company",
+  fields: readonly string[],
+  namespace: "research" | "deepResearch"
 ) => {
-  if (person.length + company.length + Object.keys(questions).length === 0) {
+  if (!isPlainObject(value)) {
+    throw new TypeError(`Sonar ${slot} selection must be an object`)
+  }
+  const values = snapshotOwnData(value, `Sonar ${slot} selection`)
+  assertExactKeys(values, new Set([...fields, namespace]), `Sonar ${slot} selection`)
+  const snapshot: Record<string, unknown> = {}
+  for (const field of fields) {
+    if (!values.has(field)) {
+      continue
+    }
+    if (values.get(field) !== true) {
+      throw new TypeError(`Sonar ${slot}.${field} must be true when selected`)
+    }
+    snapshot[field] = true
+  }
+  if (values.has(namespace)) {
+    snapshot[namespace] = snapshotQuestions(values.get(namespace), namespace)
+  }
+  return Object.freeze(snapshot)
+}
+
+const entityFieldCount = (entity: Readonly<Record<string, unknown>>, namespace: string) =>
+  Object.entries(entity).reduce(
+    (count, [key, value]) =>
+      count + (key === namespace && isPlainObject(value) ? Object.keys(value).length : 1),
+    0
+  )
+
+const assertSelection = (
+  person: Readonly<Record<string, unknown>>,
+  company: Readonly<Record<string, unknown>>,
+  namespace: "research" | "deepResearch"
+) => {
+  if (entityFieldCount(person, namespace) + entityFieldCount(company, namespace) === 0) {
     throw new TypeError("Select at least one built-in or custom Sonar field")
   }
 }
+
+const validationSeed = { linkedinURL: "https://www.linkedin.com/in/sonar-validation" } as const
 
 export const validateResearchConfig = (config: ResearchFactoryConfig): ResearchFactoryConfig => {
   if (!isPlainObject(config)) {
@@ -198,20 +206,33 @@ export const validateResearchConfig = (config: ResearchFactoryConfig): ResearchF
     assertExactKeys(values, new Set(["dynamic", "ttl"]), "Dynamic researchSonar config")
     return Object.freeze({ dynamic: true, ttl })
   }
-  assertExactKeys(values, new Set(["ttl", "person", "company", "research"]), label)
-  const person = snapshotFields(
+  assertExactKeys(values, new Set(["ttl", "person", "company"]), label)
+  const person = snapshotEntity(
     requiredValue(values, "person", label),
+    "person",
     researchPersonFields,
-    "person"
+    "research"
   )
-  const company = snapshotFields(
+  const company = snapshotEntity(
     requiredValue(values, "company", label),
+    "company",
     researchCompanyFields,
-    "company"
+    "research"
   )
-  const research = normalizedQuestions(requiredValue(values, "research", label), "research")
-  assertSelection(person, company, research)
-  return Object.freeze({ company, person, research, ttl })
+  assertSelection(person, company, "research")
+  // SAFETY: The snapshots above validate all fields and authored validators before compilation.
+  const compiled = compileResearchRequest({
+    company,
+    person,
+    seed: validationSeed,
+    ttl,
+  } as never)
+  // SAFETY: compileResearchRequest returned the canonical wire entity maps for the exact snapshot.
+  return Object.freeze({
+    company: Object.freeze(compiled.company),
+    person: Object.freeze(compiled.person),
+    ttl,
+  }) as ResearchConfig
 }
 
 export const validateDeepResearchConfig = (
@@ -230,23 +251,32 @@ export const validateDeepResearchConfig = (
     assertExactKeys(values, new Set(["dynamic", "ttl"]), "Dynamic deepResearchSonar config")
     return Object.freeze({ dynamic: true, ttl })
   }
-  assertExactKeys(values, new Set(["ttl", "person", "company", "deepResearch"]), label)
-  const person = snapshotFields(
+  assertExactKeys(values, new Set(["ttl", "person", "company"]), label)
+  const person = snapshotEntity(
     requiredValue(values, "person", label),
+    "person",
     deepResearchPersonFields,
-    "person"
-  )
-  const company = snapshotFields(
-    requiredValue(values, "company", label),
-    deepResearchCompanyFields,
-    "company"
-  )
-  const deepResearch = normalizedQuestions(
-    requiredValue(values, "deepResearch", label),
     "deepResearch"
   )
-  assertSelection(person, company, deepResearch)
-  return Object.freeze({ company, deepResearch, person, ttl })
+  const company = snapshotEntity(
+    requiredValue(values, "company", label),
+    "company",
+    deepResearchCompanyFields,
+    "deepResearch"
+  )
+  assertSelection(person, company, "deepResearch")
+  const parsed = Schema.decodeUnknownSync(DeepResearchRequest)({
+    company,
+    person,
+    seed: validationSeed,
+    ttl,
+  })
+  // SAFETY: DeepResearchRequest returned the canonical wire entity maps for the exact snapshot.
+  return Object.freeze({
+    company: Object.freeze(parsed.company),
+    person: Object.freeze(parsed.person),
+    ttl,
+  }) as DeepResearchConfig
 }
 
 const validateOptions = (
@@ -296,13 +326,20 @@ export const validateDeepResearchOptions = (
 
 const selectedDescription = (
   latency: "seconds" | "minutes",
-  person: readonly string[],
-  company: readonly string[],
-  custom: readonly string[]
-) =>
-  `Enrich an identity with Sonar in ${latency}. Returns person fields in order: ${
-    person.join(", ") || "none"
-  }; company fields in order: ${company.join(", ") || "none"}; top-level custom answers in order: ${custom.join(", ") || "none"}.`
+  person: Readonly<Record<string, unknown>>,
+  company: Readonly<Record<string, unknown>>,
+  namespace: "research" | "deepResearch"
+) => {
+  const fields = (entity: Readonly<Record<string, unknown>>) =>
+    Object.entries(entity).flatMap(([key, value]) =>
+      key === namespace && isPlainObject(value)
+        ? Object.keys(value).map((answer) => `${namespace}.${answer}`)
+        : [key]
+    )
+  return `Enrich an identity with Sonar in ${latency}. Returns person fields in order: ${
+    fields(person).join(", ") || "none"
+  }; company fields in order: ${fields(company).join(", ") || "none"}; ${namespace} answers remain nested under their person or company entity.`
+}
 
 const dynamicDescription = (
   latency: "seconds" | "minutes",
@@ -314,7 +351,7 @@ const dynamicDescription = (
     ", "
   )}, then company fields from ${company.join(
     ", "
-  )}, and may provide non-empty camelCase ${namespace} questions whose answers are returned as top-level keys.`
+  )}, and may provide non-empty camelCase ${namespace} questions whose answers remain nested under the matching person or company entity.`
 
 const appendDescription = (generated: string, caller: string | undefined) =>
   caller === undefined || caller.length === 0 ? generated : `${generated}\n\n${caller}`
@@ -323,7 +360,7 @@ export const researchDescription = (config: ResearchFactoryConfig, caller: strin
   appendDescription(
     isDynamicConfig(config)
       ? dynamicDescription("seconds", researchPersonFields, researchCompanyFields, "research")
-      : selectedDescription("seconds", config.person, config.company, Object.keys(config.research)),
+      : selectedDescription("seconds", config.person, config.company, "research"),
     caller
   )
 
@@ -339,11 +376,6 @@ export const deepResearchDescription = (
           deepResearchCompanyFields,
           "deepResearch"
         )
-      : selectedDescription(
-          "minutes",
-          config.person,
-          config.company,
-          Object.keys(config.deepResearch)
-        ),
+      : selectedDescription("minutes", config.person, config.company, "deepResearch"),
     caller
   )

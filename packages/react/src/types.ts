@@ -3,6 +3,8 @@ import type {
   ResearchConfig,
   SonarClientError,
   SonarSeed,
+  ValidDeepResearchConfig as EffectValidDeepResearchConfig,
+  ValidResearchConfig as EffectValidResearchConfig,
 } from "@usesonar/effect"
 
 type Digit = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"
@@ -51,15 +53,9 @@ type IsCustomAnswerKey<Value extends string> = string extends Value
       ? IsIdentifierTail<Rest>
       : false
 
-type InvalidAnswerKeys<Questions extends Readonly<Record<string, string>>> = {
+type InvalidAnswerKeys<Questions extends object> = {
   [Key in keyof Questions & string]: IsCustomAnswerKey<Key> extends true ? never : Key
 }[keyof Questions & string]
-
-type IsUnion<Value, Whole = Value> = Value extends unknown
-  ? [Whole] extends [Value]
-    ? false
-    : true
-  : never
 
 type OptionalKeys<Value> = {
   [Key in keyof Value]-?: object extends Pick<Value, Key> ? Key : never
@@ -75,8 +71,8 @@ type HasQuestionMapBehavior<Value> = Value extends (...arguments_: never[]) => i
     ? true
     : false
 
-type ValidQuestions<Questions extends Readonly<Record<string, string>>> =
-  true extends IsUnion<Questions>
+type ValidQuestionMember<Questions extends object> =
+  true extends HasQuestionMapBehavior<Questions>
     ? never
     : string extends keyof Questions
       ? Questions
@@ -88,16 +84,17 @@ type ValidQuestions<Questions extends Readonly<Record<string, string>>> =
           : never
         : never
 
-type ValidQuestionMap<Questions extends object> =
-  true extends HasQuestionMapBehavior<Questions>
-    ? never
-    : [Exclude<keyof Questions, string>] extends [never]
-      ? QuestionRecord<Questions> extends infer Normalized extends Readonly<Record<string, string>>
-        ? ValidQuestions<Normalized> extends never
-          ? never
-          : Questions
-        : never
-      : never
+type InvalidQuestionMembers<Questions extends object> = Questions extends unknown
+  ? ValidQuestionMember<QuestionRecord<Questions>> extends never
+    ? Questions
+    : never
+  : never
+
+type ValidQuestionMap<Questions extends object> = [InvalidQuestionMembers<Questions>] extends [
+  never,
+]
+  ? Questions
+  : never
 
 type IsDigits<Value extends string> = Value extends ""
   ? false
@@ -207,15 +204,46 @@ type ValidTTL<Value extends string> = string extends Value
                 : never
               : never
 
-export type ValidResearchConfig<C extends ResearchConfig<object>> = C & {
-  readonly ttl: ValidTTL<C["ttl"]>
-  readonly research: ValidQuestionMap<C["research"]>
-}
+type QuestionsOf<
+  Entity extends object,
+  Namespace extends PropertyKey,
+> = Namespace extends keyof Entity
+  ? Extract<NonNullable<Entity[Namespace]>, object>
+  : Record<never, never>
 
-export type ValidDeepResearchConfig<C extends DeepResearchConfig<object>> = C & {
-  readonly ttl: ValidTTL<C["ttl"]>
-  readonly deepResearch: ValidQuestionMap<C["deepResearch"]>
-}
+type ValidEntityMember<Entity extends object, Allowed extends object> = [
+  Exclude<keyof Entity, keyof Allowed>,
+] extends [never]
+  ? Entity
+  : never
+
+type InvalidEntityMembers<Entity extends object, Allowed extends object> = Entity extends unknown
+  ? ValidEntityMember<Entity, Allowed> extends never
+    ? Entity
+    : never
+  : never
+
+type ValidEntity<Entity extends object, Allowed extends object, Namespace extends keyof Allowed> = [
+  InvalidEntityMembers<Entity, Allowed>,
+] extends [never]
+  ? Entity & {
+      readonly [Key in Namespace]?: ValidQuestionMap<QuestionsOf<Entity, Namespace>>
+    }
+  : never
+
+export type ValidResearchConfig<C extends ResearchConfig<object, object>> = C &
+  EffectValidResearchConfig<C> & {
+    readonly ttl: ValidTTL<C["ttl"]>
+    readonly person: ValidEntity<C["person"], ResearchConfig["person"], "research">
+    readonly company: ValidEntity<C["company"], ResearchConfig["company"], "research">
+  }
+
+export type ValidDeepResearchConfig<C extends DeepResearchConfig<object, object>> = C &
+  EffectValidDeepResearchConfig<C> & {
+    readonly ttl: ValidTTL<C["ttl"]>
+    readonly person: ValidEntity<C["person"], DeepResearchConfig["person"], "deepResearch">
+    readonly company: ValidEntity<C["company"], DeepResearchConfig["company"], "deepResearch">
+  }
 
 export type SonarResult<Data> = {
   readonly resolve: <const Seed>(seed: [Seed] extends [SonarSeed] ? Seed : never) => void

@@ -4,20 +4,27 @@ import type { SonarClientService } from "@usesonar/effect"
 import { Effect, Layer, Stream } from "effect"
 
 export const researchConfig = {
-  company: ["name"] as const,
-  person: ["title"] as const,
-  research: {
-    sellsToSMB: "Does this company sell to small and medium businesses?",
+  company: {
+    name: true,
+    research: {
+      sellsToSMB: {
+        description: "Does this company sell to small and medium businesses?",
+        type: "string",
+      },
+    },
   },
+  person: { title: true },
   ttl: "12h",
 } as const
 
 export const deepConfig = {
-  company: ["legalName"] as const,
-  deepResearch: {
-    hasTaxExposure: "Does this company have multi-state tax exposure?",
+  company: {
+    legalName: true,
+    deepResearch: {
+      hasTaxExposure: "Does this company have multi-state tax exposure?",
+    },
   },
-  person: ["phone"] as const,
+  person: { phone: true },
   ttl: "12h",
 } as const
 
@@ -26,8 +33,10 @@ const researchPending = {
   data: {
     person: { title: { status: "pending" } },
     // oxlint-disable-next-line sort-keys -- Sonar's public contract lists person before company.
-    company: { name: { status: "pending" } },
-    sellsToSMB: { status: "pending" },
+    company: {
+      name: { status: "pending" },
+      research: { sellsToSMB: { status: "pending" } },
+    },
   },
 } as const
 
@@ -52,13 +61,15 @@ export const researchComplete = {
         status: "resolved",
         value: "Analytical Engines",
       },
-    },
-    sellsToSMB: {
-      confidence: 0.72,
-      resolvedAt: "2026-08-26T18:00:02.000Z",
-      sources: ["https://fixture.invalid/customers"],
-      status: "resolved",
-      value: "yes",
+      research: {
+        sellsToSMB: {
+          confidence: 0.72,
+          resolvedAt: "2026-08-26T18:00:02.000Z",
+          sources: ["https://fixture.invalid/customers"],
+          status: "resolved",
+          value: "yes",
+        },
+      },
     },
   },
 } as const
@@ -76,13 +87,15 @@ export const deepComplete = {
         status: "resolved",
         value: "Analytical Engines LLC",
       },
-    },
-    hasTaxExposure: {
-      confidence: 0.67,
-      resolvedAt: "2026-08-26T18:05:00.000Z",
-      sources: ["https://fixture.invalid/tax"],
-      status: "resolved",
-      value: "likely",
+      deepResearch: {
+        hasTaxExposure: {
+          confidence: 0.67,
+          resolvedAt: "2026-08-26T18:05:00.000Z",
+          sources: ["https://fixture.invalid/tax"],
+          status: "resolved",
+          value: "likely",
+        },
+      },
     },
   },
 } as const
@@ -92,8 +105,10 @@ export const deepPending = {
   data: {
     person: { phone: { status: "pending" } },
     // oxlint-disable-next-line sort-keys -- Sonar's public contract lists person before company.
-    company: { legalName: { status: "pending" } },
-    hasTaxExposure: { status: "pending" },
+    company: {
+      legalName: { status: "pending" },
+      deepResearch: { hasTaxExposure: { status: "pending" } },
+    },
   },
 } as const
 

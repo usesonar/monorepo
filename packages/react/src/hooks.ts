@@ -6,6 +6,7 @@ import {
   SonarClient,
   SonarSnapshot,
   canonicalRequestIdentity,
+  compileResearchRequest,
   initialSnapshot,
 } from "@usesonar/effect"
 import type {
@@ -25,7 +26,7 @@ import { SonarContext } from "./provider.js"
 import type { SonarResult, ValidDeepResearchConfig, ValidResearchConfig } from "./types.js"
 
 type Tier = "research" | "deepResearch"
-type Config = ResearchConfig<object> | DeepResearchConfig<object>
+type Config = ResearchConfig<object, object> | DeepResearchConfig<object, object>
 type Snapshot<C extends Config> = SonarSnapshotType<C>
 type Request<C extends Config> = {
   readonly config: C
@@ -33,15 +34,53 @@ type Request<C extends Config> = {
   readonly queryKey: QueryKey
   readonly seed: SonarSeed
 }
+type OperationRequest<C extends Config> = Omit<C, "seed"> & { readonly seed: SonarSeed }
 type StreamOperation<C extends Config> = (
   client: SonarClientService,
-  request: C & { readonly seed: SonarSeed }
+  request: OperationRequest<C>
 ) => Stream.Stream<Snapshot<C>, SonarClientError>
+type CaptureConfig<C extends Config> = (config: C) => C
 
 const isSnapshot = Schema.is(SonarSnapshot)
 
 const sameKeys = (actualKeys: readonly string[], expectedKeys: readonly string[]) =>
   actualKeys.length === expectedKeys.length && expectedKeys.every((key) => actualKeys.includes(key))
+
+type SnapshotEntity = {
+  readonly colors?: typeof Field.Type
+  readonly description?: typeof Field.Type
+  readonly deepResearch?: Readonly<Record<string, typeof Field.Type | undefined>>
+  readonly domain?: typeof Field.Type
+  readonly funding?: typeof Field.Type
+  readonly github?: typeof Field.Type
+  readonly legalName?: typeof Field.Type
+  readonly linkedin?: typeof Field.Type
+  readonly location?: typeof Field.Type
+  readonly logo?: typeof Field.Type
+  readonly name?: typeof Field.Type
+  readonly phone?: typeof Field.Type
+  readonly research?: Readonly<Record<string, typeof Field.Type | undefined>>
+  readonly title?: typeof Field.Type
+  readonly x?: typeof Field.Type
+}
+
+const sameEntityFields = (actual: SnapshotEntity, expected: SnapshotEntity) => {
+  if (!sameKeys(Object.keys(actual), Object.keys(expected))) {
+    return false
+  }
+  for (const namespace of ["research", "deepResearch"] as const) {
+    const actualQuestions = actual[namespace]
+    const expectedQuestions = expected[namespace]
+    if (
+      actualQuestions &&
+      expectedQuestions &&
+      !sameKeys(Object.keys(actualQuestions), Object.keys(expectedQuestions))
+    ) {
+      return false
+    }
+  }
+  return true
+}
 
 const validSnapshot = <C extends Config>(value: Snapshot<C>, config: C) => {
   if (!isSnapshot(value)) {
@@ -50,30 +89,41 @@ const validSnapshot = <C extends Config>(value: Snapshot<C>, config: C) => {
   const expected = initialSnapshot(config)
   return (
     sameKeys(Object.keys(value.data), Object.keys(expected.data)) &&
-    sameKeys(Object.keys(value.data.person), Object.keys(expected.data.person)) &&
-    sameKeys(Object.keys(value.data.company), Object.keys(expected.data.company))
+    sameEntityFields(value.data.person, expected.data.person) &&
+    sameEntityFields(value.data.company, expected.data.company)
   )
 }
 
 const isField = Schema.is(Field)
 const fieldsEqual = Schema.toEquivalence(Field)
 
+const appendEntityFields = (
+  fields: Map<string, typeof Field.Type>,
+  entityName: "person" | "company",
+  entity: SnapshotEntity
+) => {
+  for (const [key, value] of Object.entries(entity)) {
+    if (isField(value)) {
+      fields.set(`${entityName}.${key}`, value)
+      continue
+    }
+    if (key === "research" || key === "deepResearch") {
+      for (const [answerKey, field] of Object.entries(entity[key] ?? {})) {
+        if (isField(field)) {
+          fields.set(`${entityName}.${key}.${answerKey}`, field)
+        }
+      }
+    }
+  }
+}
+
 const snapshotFields = <C extends Config>(snapshot: Snapshot<C>) => {
   const fields = new Map<string, typeof Field.Type>()
-  for (const [key, field] of Object.entries(snapshot.data.person)) {
-    if (isField(field)) {
-      fields.set(`person.${key}`, field)
-    }
-  }
-  for (const [key, field] of Object.entries(snapshot.data.company)) {
-    if (isField(field)) {
-      fields.set(`company.${key}`, field)
-    }
-  }
-  for (const [key, field] of Object.entries(snapshot.data)) {
-    if (key !== "person" && key !== "company" && isField(field)) {
-      fields.set(key, field)
-    }
+  for (const [entityName, entity] of [
+    ["person", snapshot.data.person],
+    ["company", snapshot.data.company],
+  ] as const) {
+    appendEntityFields(fields, entityName, entity)
   }
   return fields
 }
@@ -226,7 +276,8 @@ const streamFor = async <C extends Config>(
 const useSonarTier = <C extends Config>(
   tier: Tier,
   config: C,
-  operation: StreamOperation<C>
+  operation: StreamOperation<C>,
+  captureConfig: CaptureConfig<C> = structuredClone
 ): SonarResult<SonarData<C>> => {
   const resources = useContext(SonarContext)
   if (!resources) {
@@ -240,7 +291,7 @@ const useSonarTier = <C extends Config>(
     <const Seed>(seed: [Seed] extends [SonarSeed] ? Seed : never) => {
       // SAFETY: the conditional parameter accepts Seed only when it extends SonarSeed.
       const nextSeed = seed as SonarSeed
-      const captured = structuredClone({ config, seed: nextSeed })
+      const captured = { config: captureConfig(config), seed: structuredClone(nextSeed) }
       requestSequence.current += 1
       const fallback = ["sonar", tier, "invalid", queryScope, requestSequence.current] as const
       setRequest({
@@ -250,7 +301,7 @@ const useSonarTier = <C extends Config>(
         seed: captured.seed,
       })
     },
-    [config, operation, queryScope, tier]
+    [captureConfig, config, operation, queryScope, tier]
   )
   const activeQueryKey: QueryKey = request?.queryKey ?? ["sonar", "idle"]
   const query = useQuery<Snapshot<C> | null, SonarClientError>({
@@ -278,24 +329,44 @@ const useSonarTier = <C extends Config>(
   }
 }
 
-export const useSonar = <const C extends ResearchConfig<object>>(
+export const useSonar = <const C extends ResearchConfig<object, object>>(
   config: ValidResearchConfig<C>
 ): SonarResult<SonarData<C>> =>
-  useSonarTier<C>("research", config, (client, request) => {
-    const research = client.research<C>
-    // SAFETY: useSonar accepts only ValidResearchConfig<C>, and resolve deep-clones
-    // that config without changing its question map before adding the captured seed.
-    const validRequest = request as Parameters<typeof research>[0]
-    return research(validRequest)
-  })
+  useSonarTier<C>(
+    "research",
+    config,
+    (client, request) => {
+      const research = client.research<C["person"], C["company"]>
+      // SAFETY: useSonar accepts only ValidResearchConfig<C>, and captureResearchConfig
+      // preserves C's entity and question keys while compiling validators to JSON Schema.
+      const validRequest = request as never
+      const stream = research(validRequest)
+      // SAFETY: Reconstructing ResearchConfig from C's exact person and company selectors
+      // preserves the SonarData<C> tree; ttl and the operation-only seed do not affect it.
+      return stream as Stream.Stream<Snapshot<C>, SonarClientError>
+    },
+    (authored) => {
+      const compiled = compileResearchRequest({
+        ...authored,
+        seed: { linkedinURL: "https://react.usesonar.test/capture" },
+      })
+      const { seed: _seed, ...captured } = compiled
+      // SAFETY: compilation replaces each validator with its equivalent JSON Schema but
+      // preserves every entity, built-in, and question key used to derive SonarData<C>.
+      return captured as C
+    }
+  )
 
-export const useDeepSonar = <const C extends DeepResearchConfig<object>>(
+export const useDeepSonar = <const C extends DeepResearchConfig<object, object>>(
   config: ValidDeepResearchConfig<C>
 ): SonarResult<SonarData<C>> =>
   useSonarTier<C>("deepResearch", config, (client, request) => {
-    const deepResearch = client.deepResearch<C>
+    const deepResearch = client.deepResearch<C["person"], C["company"]>
     // SAFETY: useDeepSonar accepts only ValidDeepResearchConfig<C>, and resolve
     // deep-clones that config without changing its question map before adding the seed.
-    const validRequest = request as Parameters<typeof deepResearch>[0]
-    return deepResearch(validRequest)
+    const validRequest = request as never
+    const stream = deepResearch(validRequest)
+    // SAFETY: Reconstructing DeepResearchConfig from C's exact entity selectors preserves
+    // SonarData<C>; ttl and the operation-only seed do not affect the snapshot tree.
+    return stream as Stream.Stream<Snapshot<C>, SonarClientError>
   })

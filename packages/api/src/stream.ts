@@ -13,14 +13,25 @@ import {
   Field,
   FieldEvent,
   JSONValue,
-  ResearchRequest,
   SnapshotEvent,
   SonarSnapshot,
+  compileResearchRequest,
   fieldMatchesPath,
   requestPaths,
   snapshotMatchesRequest,
 } from "./schemas.ts"
-import type { SonarEvent } from "./schemas.ts"
+import type {
+  DeepResearchCompanyInput,
+  DeepResearchInput,
+  DeepResearchPersonInput,
+  ResearchCompanyInput,
+  ResearchInput,
+  ResearchPersonInput,
+  ResearchRequest,
+  SonarEvent,
+  ValidDeepResearchEntityInput,
+  ValidResearchEntityInput,
+} from "./schemas.ts"
 
 const maximumEventSize = 1024 * 1024
 const defaultMaxReconnects = 3
@@ -59,6 +70,7 @@ type EventByteState = {
 
 const RawFieldEvent = z.object({ path: z.string().min(1) }).passthrough()
 const RawCompleteEvent = z.object({ hash: z.string().min(1) }).strict()
+const FieldCollection = z.record(z.string(), Field)
 
 const parseJSON = (data: string): JSONValue => {
   try {
@@ -106,18 +118,18 @@ const accountEventBytes = (chunk: Uint8Array, state: EventByteState) => {
 }
 
 const validateInitialSnapshot = (snapshot: SonarSnapshot, request: StreamRequest) => {
+  const fields = [snapshot.data.person, snapshot.data.company].flatMap((entity) =>
+    Object.entries(entity).flatMap(([key, value]) => {
+      if (key === "research" || key === "deepResearch") {
+        return Object.values(FieldCollection.parse(value))
+      }
+      return [Field.parse(value)]
+    })
+  )
   if (
     snapshot.status !== "pending" ||
     !snapshotMatchesRequest(snapshot, request) ||
-    [...Object.values(snapshot.data.person), ...Object.values(snapshot.data.company)].some(
-      (field) => field.status !== "pending"
-    ) ||
-    Object.entries(snapshot.data)
-      .filter(([key]) => key !== "person" && key !== "company")
-      .some(([, field]) => {
-        const parsed = Field.safeParse(field)
-        return !parsed.success || parsed.data.status !== "pending"
-      })
+    fields.some((field) => field.status !== "pending")
   ) {
     throw new SonarStreamError("The first SSE event must contain the full pending snapshot")
   }
@@ -498,16 +510,28 @@ const stream = async (
   })
 }
 
-export const streamResearch = (
+export const streamResearch = <
+  const Person extends ResearchPersonInput,
+  const Company extends ResearchCompanyInput,
+>(
   client: KyInstance,
-  request: ResearchRequest,
+  request: ResearchInput<Person, Company> &
+    (Person extends ValidResearchEntityInput<Person> ? unknown : never) &
+    (Company extends ValidResearchEntityInput<Company> ? unknown : never),
   options: StreamOptions = {}
 ): Promise<ReadableStream<SonarEvent>> =>
-  stream(client, "/v1/research", ResearchRequest.parse(request), options)
+  // SAFETY: The public input type constrains authored values; compilation performs matching
+  // runtime validation and produces the serializable wire request consumed by the stream.
+  stream(client, "/v1/research", compileResearchRequest(request as never), options)
 
-export const streamDeepResearch = (
+export const streamDeepResearch = <
+  const Person extends DeepResearchPersonInput,
+  const Company extends DeepResearchCompanyInput,
+>(
   client: KyInstance,
-  request: DeepResearchRequest,
+  request: DeepResearchInput<Person, Company> &
+    (Person extends ValidDeepResearchEntityInput<Person> ? unknown : never) &
+    (Company extends ValidDeepResearchEntityInput<Company> ? unknown : never),
   options: StreamOptions = {}
 ): Promise<ReadableStream<SonarEvent>> =>
   stream(client, "/v1/deepResearch", DeepResearchRequest.parse(request), options)

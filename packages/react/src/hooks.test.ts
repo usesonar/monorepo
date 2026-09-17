@@ -14,10 +14,10 @@ import { QueryCache } from "@tanstack/react-query"
 import {
   TransportError,
   canonicalRequestIdentity,
+  compileResearchRequest,
   initialSnapshot,
-  question,
 } from "@usesonar/effect"
-import type { SonarSeed } from "@usesonar/effect"
+import type { ResearchValidator, SonarSeed } from "@usesonar/effect"
 import { act, createElement, useEffect, useState } from "react"
 
 import {
@@ -34,17 +34,38 @@ import type { MountedTree } from "../test/harness"
 import { SonarProvider, useDeepSonar, useSonar } from "./index"
 import type { SonarProviderProps } from "./index"
 
+const booleanValidator = (description: string): ResearchValidator<boolean> => {
+  const jsonSchema = { description, type: "boolean" } as const
+  return {
+    "~standard": {
+      jsonSchema: {
+        input: () => jsonSchema,
+        output: () => jsonSchema,
+      },
+      validate: () => ({ value: true }),
+      vendor: "@usesonar/react-test",
+      version: 1,
+    },
+  } as const
+}
+
 const researchConfig = {
-  company: ["name"],
-  person: ["title", "linkedin"],
-  research: { sellsToSMB: question<boolean>("Does this company sell to SMBs?") },
+  company: {
+    name: true,
+    research: {
+      sellsToSMB: booleanValidator("Does this company sell to SMBs?"),
+    },
+  },
+  person: { linkedin: true, title: true },
   ttl: "12h",
 } as const
 
 const deepConfig = {
-  company: ["legalName"],
-  deepResearch: { usesQuickBooks: question<boolean>("Does it use QuickBooks?") },
-  person: ["phone"],
+  company: {
+    deepResearch: { usesQuickBooks: "Does it use QuickBooks?" },
+    legalName: true,
+  },
+  person: { phone: true },
   ttl: "7d",
 } as const
 
@@ -64,16 +85,24 @@ type CapturedResult = {
 }
 
 type MutableResearchConfigFixture = {
-  company: ("domain" | "name")[]
-  person: ("github" | "title")[]
-  research: { sellsToSMB: string }
+  company: {
+    domain?: true
+    name?: true
+    research: { sellsToSMB: { description: string; type: "boolean" } }
+  }
+  person: { github?: true; title?: true }
   ttl: "12h" | "30d"
 }
 
 type MutableDeepConfigFixture = {
-  company: "legalName"[]
-  deepResearch: { usesQuickBooks: string }
-  person: "phone"[]
+  company: { deepResearch: { usesQuickBooks: string }; legalName?: true }
+  person: { phone?: true }
+  ttl: "7d" | "30d"
+}
+
+type RerenderDeepConfig = {
+  company: { deepResearch: { usesQuickBooks: string }; legalName: true }
+  person: { phone: true }
   ttl: "7d" | "30d"
 }
 
@@ -209,6 +238,12 @@ describe("Sonar hooks", () => {
       expect(research.loading).toBe(false)
       expect(deepResearch.loading).toBe(false)
     })
+    expect(research.data).toHaveProperty("company.research.sellsToSMB.value", true)
+    expect(deepResearch.data).toHaveProperty(
+      "company.deepResearch.usesQuickBooks.value",
+      "usesQuickBooks-value"
+    )
+    expect(research.data).not.toHaveProperty("sellsToSMB")
   })
 
   it("shares one stream for identical hook requests", async () => {
@@ -279,9 +314,13 @@ describe("Sonar hooks", () => {
     const first = emptyResult()
     const second = emptyResult()
     const equivalentConfig = {
-      company: ["name"],
-      person: ["title", "linkedin"],
-      research: { sellsToSMB: question<boolean>("Does this company sell to SMBs?") },
+      company: {
+        name: true,
+        research: {
+          sellsToSMB: booleanValidator("Does this company sell to SMBs?"),
+        },
+      },
+      person: { linkedin: true, title: true },
       ttl: "12h",
     } as const
     const Probes = () => {
@@ -380,8 +419,8 @@ describe("Sonar hooks", () => {
     const result = emptyResult()
     const updatedConfig = {
       ...researchConfig,
-      company: ["domain"] as const,
-      person: ["github"] as const,
+      company: { domain: true } as const,
+      person: { github: true } as const,
       ttl: "30d" as const,
     }
     let updated = false
@@ -397,7 +436,11 @@ describe("Sonar hooks", () => {
     await waitFor(() => expect(recorder.starts).toHaveLength(1))
 
     const { seed: _seed, ...capturedConfig } = recorder.starts[0]?.request ?? {}
-    expect(capturedConfig).toEqual(updatedConfig)
+    const { seed: _expectedSeed, ...expectedConfig } = compileResearchRequest({
+      ...updatedConfig,
+      seed: adaSeed,
+    })
+    expect(capturedConfig).toEqual(expectedConfig)
   })
 
   it("keeps the captured research request when config rerenders before stream start", async () => {
@@ -405,7 +448,12 @@ describe("Sonar hooks", () => {
     const result = emptyResult()
     const updatedConfig = {
       ...researchConfig,
-      research: { sellsToSMB: question<boolean>("Use the updated question.") },
+      company: {
+        ...researchConfig.company,
+        research: {
+          sellsToSMB: booleanValidator("Use the updated question."),
+        },
+      },
       ttl: "30d" as const,
     }
     let renderedConfig: typeof researchConfig | typeof updatedConfig = researchConfig
@@ -431,7 +479,9 @@ describe("Sonar hooks", () => {
     await act(trigger)
 
     await waitFor(() => expect(recorder.starts).toHaveLength(1))
-    expect(recorder.starts[0]?.request).toEqual({ ...researchConfig, seed: adaSeed })
+    expect(recorder.starts[0]?.request).toEqual(
+      compileResearchRequest({ ...researchConfig, seed: adaSeed })
+    )
   })
 
   it("keeps the captured deep request when config rerenders before stream start", async () => {
@@ -439,10 +489,13 @@ describe("Sonar hooks", () => {
     const result = emptyResult()
     const updatedConfig = {
       ...deepConfig,
-      deepResearch: { usesQuickBooks: question<boolean>("Use the updated deep question.") },
+      company: {
+        ...deepConfig.company,
+        deepResearch: { usesQuickBooks: "Use the updated deep question." },
+      },
       ttl: "30d" as const,
     }
-    let renderedConfig: typeof deepConfig | typeof updatedConfig = deepConfig
+    let renderedConfig: RerenderDeepConfig = deepConfig
     let resolveAndRerender: (() => void) | undefined
     const Probe = () => {
       const [, forceRender] = useState(0)
@@ -474,9 +527,13 @@ describe("Sonar hooks", () => {
       const { layer, recorder } = createTestLayer()
       const result = emptyResult()
       const config: MutableResearchConfigFixture = {
-        company: ["name"],
-        person: ["title"],
-        research: { sellsToSMB: question<boolean>("Use the original question.") },
+        company: {
+          name: true,
+          research: {
+            sellsToSMB: { description: "Use the original question.", type: "boolean" },
+          },
+        },
+        person: { title: true },
         ttl: "12h",
       }
       const seed = {
@@ -494,9 +551,11 @@ describe("Sonar hooks", () => {
 
       await act(() => {
         result.resolve(seed)
-        config.company.splice(0, 1, "domain")
-        config.person.splice(0, 1, "github")
-        config.research.sellsToSMB = question<boolean>("Use the mutated question.")
+        Reflect.deleteProperty(config.company, "name")
+        config.company.domain = true
+        Reflect.deleteProperty(config.person, "title")
+        config.person.github = true
+        config.company.research.sellsToSMB.description = "Use the mutated question."
         config.ttl = "30d"
         seed.email = "mutated@example.test"
         seed.context.flags.push("mutated")
@@ -504,7 +563,9 @@ describe("Sonar hooks", () => {
       })
 
       await waitFor(() => expect(recorder.starts).toHaveLength(1))
-      expect(recorder.starts[0]?.request).toEqual({ ...expectedConfig, seed: expectedSeed })
+      expect(recorder.starts[0]?.request).toEqual(
+        compileResearchRequest({ ...expectedConfig, seed: expectedSeed })
+      )
 
       const canonical = JSON.parse(
         canonicalRequestIdentity({ config: expectedConfig, seed: expectedSeed, tier: "research" })
@@ -525,9 +586,11 @@ describe("Sonar hooks", () => {
     const { layer, recorder } = createTestLayer()
     const result = emptyResult()
     const config: MutableDeepConfigFixture = {
-      company: ["legalName"],
-      deepResearch: { usesQuickBooks: question<boolean>("Use the original deep question.") },
-      person: ["phone"],
+      company: {
+        deepResearch: { usesQuickBooks: "Use the original deep question." },
+        legalName: true,
+      },
+      person: { phone: true },
       ttl: "7d",
     }
     const seed = {
@@ -545,9 +608,9 @@ describe("Sonar hooks", () => {
 
     await act(() => {
       result.resolve(seed)
-      config.company.splice(0)
-      config.person.splice(0)
-      config.deepResearch.usesQuickBooks = question<boolean>("Use the mutated deep question.")
+      Reflect.deleteProperty(config.company, "legalName")
+      Reflect.deleteProperty(config.person, "phone")
+      config.company.deepResearch.usesQuickBooks = "Use the mutated deep question."
       config.ttl = "30d"
       seed.email = "mutated@example.test"
       seed.context.flags.push("mutated")
@@ -916,16 +979,16 @@ describe("Sonar hooks", () => {
     const expectedPartial = partialSnapshot(researchConfig)
     recorder.starts[0]?.source.push(expectedPartial)
     await waitFor(() => expect(result.data).toEqual(expectedPartial.data))
-    const { title } = expectedPartial.data.person
-    if (title?.status !== "resolved") {
-      throw new Error("Partial fixture did not resolve the expected title field")
+    const { linkedin } = expectedPartial.data.person
+    if (linkedin?.status !== "resolved") {
+      throw new Error("Partial fixture did not resolve the expected LinkedIn field")
     }
     recorder.starts[0]?.source.pushMalformed({
       data: {
         ...expectedPartial.data,
         person: {
           ...expectedPartial.data.person,
-          title: { ...title, value: "mutated-title-value" },
+          linkedin: { ...linkedin, value: "https://www.linkedin.com/in/mutated" },
         },
       },
       status: "pending",

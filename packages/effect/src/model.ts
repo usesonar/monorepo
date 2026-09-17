@@ -1,6 +1,10 @@
 import type {
-  AnswersOf,
+  DeepResearchCompanyInput as APIDeepResearchCompanyInput,
+  DeepResearchPersonInput as APIDeepResearchPersonInput,
   JSONValue as APIJSONValue,
+  ResearchCompanyInput as APIResearchCompanyInput,
+  ResearchOutput,
+  ResearchPersonInput as APIResearchPersonInput,
   SonarSeed as APISonarSeed,
   TTL as APITTL,
 } from "@usesonar/api"
@@ -8,43 +12,6 @@ import type {
 export type JSONValue = APIJSONValue
 export type SonarSeed = APISonarSeed
 export type TTL = APITTL
-
-export type ResearchPersonField = "linkedin" | "title" | "x" | "github"
-export type ResearchCompanyField =
-  | "domain"
-  | "name"
-  | "logo"
-  | "colors"
-  | "location"
-  | "description"
-  | "funding"
-export type DeepResearchPersonField = "phone"
-export type DeepResearchCompanyField = "legalName"
-
-export type ResearchConfig<Questions extends object = Readonly<Record<string, string>>> = {
-  readonly ttl: TTL
-  readonly person: readonly ResearchPersonField[]
-  readonly company: readonly ResearchCompanyField[]
-  readonly research: Questions
-  readonly deepResearch?: never
-}
-
-export type DeepResearchConfig<Questions extends object = Readonly<Record<string, string>>> = {
-  readonly ttl: TTL
-  readonly person: readonly DeepResearchPersonField[]
-  readonly company: readonly DeepResearchCompanyField[]
-  readonly deepResearch: Questions
-  readonly research?: never
-}
-
-export type ResearchRequest<C extends ResearchConfig<object> = ResearchConfig> = C & {
-  readonly seed: SonarSeed
-}
-
-export type DeepResearchRequest<C extends DeepResearchConfig<object> = DeepResearchConfig> = C & {
-  readonly seed: SonarSeed
-}
-
 export type Field<Value = JSONValue> =
   | { readonly status: "pending" }
   | {
@@ -62,6 +29,61 @@ export type Field<Value = JSONValue> =
       readonly status: "skipped"
       readonly reason: "consumerEmail" | "noPersonSeed" | "noCompanySeed"
     }
+
+export type ResearchConfig<
+  Person extends APIResearchPersonInput<object> = APIResearchPersonInput,
+  Company extends APIResearchCompanyInput<object> = APIResearchCompanyInput,
+> = {
+  readonly ttl: TTL
+  readonly seed?: never
+  readonly person: Person & { readonly deepResearch?: never; readonly phone?: never }
+  readonly company: Company & { readonly deepResearch?: never; readonly legalName?: never }
+}
+
+export type DeepResearchConfig<
+  Person extends APIDeepResearchPersonInput<object> = APIDeepResearchPersonInput,
+  Company extends APIDeepResearchCompanyInput<object> = APIDeepResearchCompanyInput,
+> = {
+  readonly ttl: TTL
+  readonly seed?: never
+  readonly person: Person & {
+    readonly github?: never
+    readonly linkedin?: never
+    readonly research?: never
+    readonly title?: never
+    readonly x?: never
+  }
+  readonly company: Company & {
+    readonly colors?: never
+    readonly description?: never
+    readonly domain?: never
+    readonly funding?: never
+    readonly location?: never
+    readonly logo?: never
+    readonly name?: never
+    readonly research?: never
+  }
+}
+
+export type AnyResearchConfig = ResearchConfig<
+  APIResearchPersonInput<object>,
+  APIResearchCompanyInput<object>
+>
+export type AnyDeepResearchConfig = DeepResearchConfig<
+  APIDeepResearchPersonInput<object>,
+  APIDeepResearchCompanyInput<object>
+>
+
+export type ResearchRequest<C extends AnyResearchConfig = ResearchConfig> = Omit<C, "seed"> & {
+  readonly seed: SonarSeed
+}
+
+export type DeepResearchRequest<C extends AnyDeepResearchConfig = DeepResearchConfig> = Omit<
+  C,
+  "seed"
+> & {
+  readonly seed: SonarSeed
+}
 
 type ResearchPersonCatalog = {
   readonly linkedin: string
@@ -83,69 +105,78 @@ type ResearchCompanyCatalog = {
 type DeepResearchPersonCatalog = { readonly phone: string }
 type DeepResearchCompanyCatalog = { readonly legalName: string }
 
-type IsUnion<Value, Whole = Value> = Value extends unknown
-  ? [Whole] extends [Value]
-    ? false
-    : true
-  : never
+type SelectedFields<Catalog, Entity extends object> = {
+  readonly [
+    Key in keyof Catalog as Key extends keyof Entity
+      ? true extends Entity[Key]
+        ? object extends Pick<Entity, Key>
+          ? never
+          : Key
+        : never
+      : never
+  ]: Field<Catalog[Key]>
+} & {
+  readonly [
+    Key in keyof Catalog as Key extends keyof Entity
+      ? true extends Entity[Key]
+        ? object extends Pick<Entity, Key>
+          ? Key
+          : never
+        : never
+      : never
+  ]?: Field<Catalog[Key]>
+}
 
-type IsAny<Value> = 0 extends 1 & Value ? true : false
+type QuestionsOf<
+  Entity extends object,
+  Tier extends "research" | "deepResearch",
+> = Tier extends keyof Entity ? Extract<NonNullable<Entity[Tier]>, object> : Record<never, never>
 
-type TupleHasUnionElement<Keys extends readonly PropertyKey[]> = Keys extends readonly [
-  infer Head extends PropertyKey,
-  ...infer Tail extends readonly PropertyKey[],
-]
-  ? true extends IsAny<Head>
-    ? true
-    : true extends IsUnion<Head>
-      ? true
-      : TupleHasUnionElement<Tail>
-  : false
+type ResearchAnswerFields<Questions extends object> = string extends keyof Questions
+  ? Readonly<Record<string, Field<JSONValue> | undefined>>
+  : { readonly [Key in keyof Questions]: Field<ResearchOutput<Questions[Key]>> }
 
-type Selected<Catalog, Keys extends readonly PropertyKey[]> = Keys extends unknown
-  ? number extends Keys["length"]
-    ? Partial<{
-        readonly [Key in Keys[number] & keyof Catalog]: Field<Catalog[Key]>
-      }>
-    : true extends TupleHasUnionElement<Keys>
-      ? Partial<{
-          readonly [Key in Keys[number] & keyof Catalog]: Field<Catalog[Key]>
-        }>
-      : {
-          readonly [Key in Keys[number] & keyof Catalog]: Field<Catalog[Key]>
-        }
-  : never
+type DeepResearchAnswerFields<Questions extends object> = string extends keyof Questions
+  ? Readonly<Record<string, Field<string> | undefined>>
+  : { readonly [Key in keyof Questions]: Field<string> }
 
-export type DefaultAnswers<C extends ResearchConfig<object> | DeepResearchConfig<object>> =
-  C extends ResearchConfig<object>
-    ? AnswersOf<C["research"]>
-    : C extends DeepResearchConfig<object>
-      ? AnswersOf<C["deepResearch"]>
+type ResearchNamespace<Entity extends object> = keyof QuestionsOf<Entity, "research"> extends never
+  ? object
+  : object extends Pick<Entity, Extract<"research", keyof Entity>>
+    ? { readonly research?: ResearchAnswerFields<QuestionsOf<Entity, "research">> }
+    : { readonly research: ResearchAnswerFields<QuestionsOf<Entity, "research">> }
+
+type DeepResearchNamespace<Entity extends object> = keyof QuestionsOf<
+  Entity,
+  "deepResearch"
+> extends never
+  ? object
+  : object extends Pick<Entity, Extract<"deepResearch", keyof Entity>>
+    ? { readonly deepResearch?: DeepResearchAnswerFields<QuestionsOf<Entity, "deepResearch">> }
+    : { readonly deepResearch: DeepResearchAnswerFields<QuestionsOf<Entity, "deepResearch">> }
+
+type ResearchDataOf<C extends AnyResearchConfig> = {
+  readonly person: SelectedFields<ResearchPersonCatalog, C["person"]> &
+    ResearchNamespace<C["person"]>
+  readonly company: SelectedFields<ResearchCompanyCatalog, C["company"]> &
+    ResearchNamespace<C["company"]>
+}
+
+type DeepResearchDataOf<C extends AnyDeepResearchConfig> = {
+  readonly person: SelectedFields<DeepResearchPersonCatalog, C["person"]> &
+    DeepResearchNamespace<C["person"]>
+  readonly company: SelectedFields<DeepResearchCompanyCatalog, C["company"]> &
+    DeepResearchNamespace<C["company"]>
+}
+
+export type SonarData<C extends AnyResearchConfig | AnyDeepResearchConfig> =
+  C extends AnyResearchConfig
+    ? ResearchDataOf<C>
+    : C extends AnyDeepResearchConfig
+      ? DeepResearchDataOf<C>
       : never
 
-type AnswerFields<Answers extends Readonly<Record<string, JSONValue | undefined>>> =
-  Answers extends unknown
-    ? string extends keyof Answers
-      ? Readonly<Record<string, Field<JSONValue> | undefined>>
-      : {
-          readonly [Key in keyof Answers]: Field<Exclude<Answers[Key], undefined>>
-        }
-    : never
-
-export type SonarData<C extends ResearchConfig<object> | DeepResearchConfig<object>> =
-  C extends ResearchConfig<object>
-    ? {
-        readonly person: Selected<ResearchPersonCatalog, C["person"]>
-        readonly company: Selected<ResearchCompanyCatalog, C["company"]>
-      } & AnswerFields<DefaultAnswers<C>>
-    : C extends DeepResearchConfig<object>
-      ? {
-          readonly person: Selected<DeepResearchPersonCatalog, C["person"]>
-          readonly company: Selected<DeepResearchCompanyCatalog, C["company"]>
-        } & AnswerFields<DefaultAnswers<C>>
-      : never
-
-export type SonarSnapshot<C extends ResearchConfig<object> | DeepResearchConfig<object>> = {
+export type SonarSnapshot<C extends AnyResearchConfig | AnyDeepResearchConfig> = {
   readonly status: "pending" | "complete"
   readonly data: SonarData<C>
 }
@@ -161,65 +192,141 @@ export type SonarProtocolEvent = FieldEvent | CompleteEvent
 
 export const CompleteEvent: CompleteEvent = { _tag: "CompleteEvent" }
 
+const researchPersonFields = ["linkedin", "title", "x", "github"] as const
+const researchCompanyFields = [
+  "domain",
+  "name",
+  "logo",
+  "colors",
+  "location",
+  "description",
+  "funding",
+] as const
+const deepResearchPersonFields = ["phone"] as const
+const deepResearchCompanyFields = ["legalName"] as const
+
 const pendingFields = (keys: readonly string[]): Record<string, Field> =>
   Object.fromEntries(keys.map((key) => [key, { status: "pending" }]))
 
-export const initialSnapshot = <
-  const C extends ResearchConfig<object> | DeepResearchConfig<object>,
->(
+type ConfigEntity = ReadonlyMap<string, true | object>
+type FieldNamespace = Readonly<Record<string, Field>>
+type SnapshotEntity = { readonly [key: string]: Field | FieldNamespace | undefined }
+
+const entitySnapshot = (
+  entity: ConfigEntity,
+  builtIns: readonly string[],
+  tier: "research" | "deepResearch"
+) => {
+  const selected = builtIns.filter((key) => entity.get(key) === true)
+  const questions = entity.get(tier)
+  const questionKeys = questions === undefined || questions === true ? [] : Object.keys(questions)
+  const snapshot: Record<string, Field | Record<string, Field>> = pendingFields(selected)
+  if (questionKeys.length > 0) {
+    snapshot[tier] = pendingFields(questionKeys)
+  }
+  return snapshot
+}
+
+export const initialSnapshot = <const C extends AnyResearchConfig | AnyDeepResearchConfig>(
   config: C
 ): SonarSnapshot<C> => {
-  const questions = ("research" in config ? config.research : config.deepResearch) ?? {}
+  const research =
+    "research" in config.person ||
+    "research" in config.company ||
+    researchPersonFields.some((key) => key in config.person) ||
+    researchCompanyFields.some((key) => key in config.company)
+  const tier = research ? "research" : "deepResearch"
+  const personFields = research ? researchPersonFields : deepResearchPersonFields
+  const companyFields = research ? researchCompanyFields : deepResearchCompanyFields
+  // SAFETY: Both config entities contain only literal-true built-ins and object question maps.
+  const personConfig = new Map(Object.entries(config.person)) as ConfigEntity
+  // SAFETY: Both config entities contain only literal-true built-ins and object question maps.
+  const companyConfig = new Map(Object.entries(config.company)) as ConfigEntity
   // oxlint-disable-next-line sort-keys -- The public result contract requires person before company.
   const data = {
-    person: pendingFields(config.person),
-    company: pendingFields(config.company),
-    ...pendingFields(Object.keys(questions)),
+    person: entitySnapshot(personConfig, personFields, tier),
+    company: entitySnapshot(companyConfig, companyFields, tier),
   }
-  // SAFETY: The data keys are constructed directly from C's selected catalog fields and
-  // question keys, and every generated value is the valid pending Field variant.
+  // SAFETY: Each selected built-in and entity-owned question key from C is represented once as a
+  // pending Field under the operation-derived namespace.
   return { data, status: "pending" } as SonarSnapshot<C>
 }
 
-export const snapshotPaths = <C extends ResearchConfig<object> | DeepResearchConfig<object>>(
-  snapshot: SonarSnapshot<C>
-) => [
-  ...Object.keys(snapshot.data.person).map((key) => `person.${key}`),
-  ...Object.keys(snapshot.data.company).map((key) => `company.${key}`),
-  ...Object.keys(snapshot.data).filter((key) => key !== "person" && key !== "company"),
-]
+const entityPaths = (slot: "person" | "company", entity: SnapshotEntity) =>
+  Object.entries(entity).flatMap(([key, value]) =>
+    key === "research" || key === "deepResearch"
+      ? Object.keys(value ?? {}).map((answerKey) => `${slot}.${key}.${answerKey}`)
+      : [`${slot}.${key}`]
+  )
 
-export const fieldAtPath = <C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+export const snapshotPaths = <C extends AnyResearchConfig | AnyDeepResearchConfig>(
+  snapshot: SonarSnapshot<C>
+) => {
+  // SAFETY: SonarData entity properties contain only Field leaves and answer namespaces.
+  const person = snapshot.data.person as SnapshotEntity
+  // SAFETY: SonarData entity properties contain only Field leaves and answer namespaces.
+  const company = snapshot.data.company as SnapshotEntity
+  return [...entityPaths("person", person), ...entityPaths("company", company)]
+}
+
+export const fieldAtPath = <C extends AnyResearchConfig | AnyDeepResearchConfig>(
   snapshot: SonarSnapshot<C>,
   path: string
 ): Field | undefined => {
-  const [slot, key, extra] = path.split(".")
-  if (extra !== undefined || key === undefined) {
-    // SAFETY: A non-built-in path can only address a top-level custom Field leaf.
-    const customFields = snapshot.data as SonarData<C> & Readonly<Record<string, Field | undefined>>
-    return customFields[path]
+  const [entityKey, fieldKey, answerKey, extra] = path.split(".")
+  if (
+    extra !== undefined ||
+    fieldKey === undefined ||
+    (entityKey !== "person" && entityKey !== "company")
+  ) {
+    return undefined
   }
-  if (slot === "person" || slot === "company") {
-    // SAFETY: Both built-in slots contain only Field values; the path key is checked dynamically.
-    const fields = snapshot.data[slot] as Readonly<Record<string, Field>>
-    return fields[key]
+  // SAFETY: SonarData entity properties contain only Field leaves and answer namespaces.
+  const entity = snapshot.data[entityKey] as SnapshotEntity
+  if (answerKey === undefined) {
+    const field = entity[fieldKey]
+    if (fieldKey === "research" || fieldKey === "deepResearch") {
+      return undefined
+    }
+    // SAFETY: Non-namespace properties on a snapshot entity contain only Field leaves.
+    return field as Field | undefined
   }
-  return undefined
+  if (fieldKey !== "research" && fieldKey !== "deepResearch") {
+    return undefined
+  }
+  // SAFETY: The guarded field key can contain only an entity-owned answer namespace.
+  const answers = entity[fieldKey] as FieldNamespace | undefined
+  return answers?.[answerKey]
 }
 
-export const withField = <C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+export const withField = <C extends AnyResearchConfig | AnyDeepResearchConfig>(
   snapshot: SonarSnapshot<C>,
   path: string,
   field: Field
 ): SonarSnapshot<C> => {
-  const [slot, key, extra] = path.split(".")
-  const data =
-    extra === undefined && key !== undefined && (slot === "person" || slot === "company")
-      ? { ...snapshot.data, [slot]: { ...snapshot.data[slot], [key]: field } }
-      : { ...snapshot.data, [path]: field }
-  // SAFETY: Only one existing Field leaf is replaced, preserving the config-derived data shape.
+  // SAFETY: reduceSnapshot calls withField only after fieldAtPath validates the path structure.
+  const [entityKey, fieldKey, answerKey] = path.split(".") as [
+    "person" | "company",
+    string,
+    string | undefined,
+  ]
+  // SAFETY: SonarData entity properties contain only Field leaves and answer namespaces.
+  const entity = snapshot.data[entityKey] as SnapshotEntity
+  const nextEntity =
+    answerKey === undefined
+      ? { ...entity, [fieldKey]: field }
+      : {
+          ...entity,
+          [fieldKey]: {
+            // SAFETY: A three-segment validated path always targets an answer namespace.
+            ...(entity[fieldKey] as FieldNamespace),
+            [answerKey]: field,
+          },
+        }
+  // SAFETY: reduceSnapshot calls this only after fieldAtPath proves that path names an existing
+  // Field leaf, so this preserves C's config-derived data shape.
   return {
-    data,
+    data: { ...snapshot.data, [entityKey]: nextEntity },
     status: "pending",
   } as SonarSnapshot<C>
 }

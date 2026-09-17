@@ -1,3 +1,4 @@
+import type { JSONValue } from "@usesonar/effect"
 /* eslint-disable anti-slop/no-chained-type-assertions, anti-slop/no-unknown-parameters, anti-slop/no-unknown-returns, anti-slop/no-unsafe-dictionary-type -- Eve's schema callbacks expose unknown boundary values, while the hidden overload implementation uses unknown to reconnect config-derived schemas and executors after defineTool erases that relationship. */
 import { defineTool } from "eve/tools"
 
@@ -39,6 +40,7 @@ import type {
   DeepResearchStaticFactoryArgument,
   DeepResearchStaticFactoryConfig,
   DeepResearchTool,
+  DynamicAnswers,
   DynamicFactoryArgument,
   ResearchDynamicConfig,
   ResearchFactoryConfig,
@@ -48,8 +50,8 @@ import type {
   ResearchTool,
 } from "./types.js"
 
-export function researchSonar<const Answers extends object = never>(
-  config: DynamicFactoryArgument<ResearchDynamicConfig, Answers>,
+export function researchSonar<const Answers extends DynamicAnswers = never>(
+  config: DynamicFactoryArgument<ResearchDynamicConfig, Answers, JSONValue>,
   options?: ResearchOptions
 ): ResearchTool<ResearchDynamicConfig, NoInfer<Answers>>
 export function researchSonar<const Config extends ResearchStaticFactoryConfig>(
@@ -69,9 +71,14 @@ export function researchSonar(config: ResearchFactoryConfig, options?: ResearchO
   const optionsSnapshot = validatedOptions
   const dynamic = isDynamicConfig(configSnapshot)
   const inputSchema = researchInputSchema(dynamic)
-  const personFields = dynamic ? researchPersonFields : configSnapshot.person
-  const companyFields = dynamic ? researchCompanyFields : configSnapshot.company
-  const customFields = dynamic ? undefined : Object.keys(configSnapshot.research)
+  const personFields = dynamic
+    ? researchPersonFields
+    : researchPersonFields.filter((field) => configSnapshot.person[field] === true)
+  const companyFields = dynamic
+    ? researchCompanyFields
+    : researchCompanyFields.filter((field) => configSnapshot.company[field] === true)
+  const personAnswers = dynamic ? undefined : Object.keys(configSnapshot.person.research ?? {})
+  const companyAnswers = dynamic ? undefined : Object.keys(configSnapshot.company.research ?? {})
   const tool = defineTool({
     description: researchDescription(configSnapshot, optionsSnapshot.description),
     async *execute(input, context) {
@@ -86,19 +93,26 @@ export function researchSonar(config: ResearchFactoryConfig, options?: ResearchO
     inputSchema,
     outputSchema: researchOutputSchema(configSnapshot),
     toModelOutput: (snapshot) =>
-      projectSnapshot(snapshot, personFields, companyFields, customFields),
+      projectSnapshot(
+        snapshot,
+        personFields,
+        companyFields,
+        "research",
+        personAnswers,
+        companyAnswers
+      ),
   })
   // SAFETY: The schemas, request builder, stream, and projection are all derived from the same
   // validated Config. The cast restores that config-derived relationship after runtime assembly.
   return tool as unknown as ResearchTool<ResearchFactoryConfig, never>
 }
 
-export function deepResearchSonar<const Answers extends object = never>(
-  config: DynamicFactoryArgument<DeepResearchDynamicConfig, Answers>,
+export function deepResearchSonar<const Answers extends DynamicAnswers = never>(
+  config: DynamicFactoryArgument<DeepResearchDynamicConfig, Answers, string>,
   options: DeepResearchOptions & { readonly execution: "background" }
 ): BackgroundDeepResearchTool<DeepResearchDynamicConfig, NoInfer<Answers>>
-export function deepResearchSonar<const Answers extends object = never>(
-  config: DynamicFactoryArgument<DeepResearchDynamicConfig, Answers>,
+export function deepResearchSonar<const Answers extends DynamicAnswers = never>(
+  config: DynamicFactoryArgument<DeepResearchDynamicConfig, Answers, string>,
   options?: DeepResearchOptions & { readonly execution?: undefined }
 ): DeepResearchTool<DeepResearchDynamicConfig, NoInfer<Answers>>
 export function deepResearchSonar<const Config extends DeepResearchStaticFactoryConfig>(
@@ -126,11 +140,25 @@ export function deepResearchSonar(rawConfig: unknown, options?: DeepResearchOpti
   const inputSchema = deepResearchInputSchema(dynamic)
   const outputSchema = deepResearchOutputSchema(configSnapshot)
   const description = deepResearchDescription(configSnapshot, optionsSnapshot.description)
-  const personFields = dynamic ? deepResearchPersonFields : configSnapshot.person
-  const companyFields = dynamic ? deepResearchCompanyFields : configSnapshot.company
-  const customFields = dynamic ? undefined : Object.keys(configSnapshot.deepResearch)
+  const personFields = dynamic
+    ? deepResearchPersonFields
+    : deepResearchPersonFields.filter((field) => configSnapshot.person[field] === true)
+  const companyFields = dynamic
+    ? deepResearchCompanyFields
+    : deepResearchCompanyFields.filter((field) => configSnapshot.company[field] === true)
+  const personAnswers = dynamic ? undefined : Object.keys(configSnapshot.person.deepResearch ?? {})
+  const companyAnswers = dynamic
+    ? undefined
+    : Object.keys(configSnapshot.company.deepResearch ?? {})
   const toModelOutput = (snapshot: unknown) =>
-    projectSnapshot(snapshot, personFields, companyFields, customFields)
+    projectSnapshot(
+      snapshot,
+      personFields,
+      companyFields,
+      "deepResearch",
+      personAnswers,
+      companyAnswers
+    )
 
   if (optionsSnapshot.execution === "background") {
     const tool = defineTool<typeof inputSchema, Promise<unknown>>({

@@ -1,12 +1,13 @@
 import { describe, expect, it } from "bun:test"
 
-import { question } from "@usesonar/effect"
 import type {
   DeepResearchConfig,
   Field,
   JSONValue,
   ResearchConfig,
+  ResearchValidator,
   SonarClientError,
+  StandardJSONSchemaV1,
 } from "@usesonar/effect"
 import { createElement } from "react"
 
@@ -16,420 +17,272 @@ type Equal<Left, Right> =
   (<Value>() => Value extends Left ? 1 : 2) extends <Value>() => Value extends Right ? 1 : 2
     ? true
     : false
-
 type Assert<Condition extends true> = Condition
 type ResolvedValue<Value> =
-  Extract<Value, { status: "resolved" }> extends {
-    value: infer Resolved
-  }
-    ? Resolved
-    : never
+  Extract<Value, { status: "resolved" }> extends { value: infer Resolved } ? Resolved : never
 
-declare const numericQuestions: { readonly 0: string }
+declare const booleanValidator: StandardJSONSchemaV1<unknown, boolean>
+declare const numericQuestions: { readonly 0: ResearchValidator<number> }
 declare const questionKey: unique symbol
-declare const optionalQuestions: { readonly maybe?: string }
-declare const symbolQuestions: { readonly [questionKey]: string }
+declare const optionalResearchQuestions: { readonly maybe?: ResearchValidator<string> }
+declare const optionalDeepQuestions: { readonly maybe?: string }
+declare const symbolResearchQuestions: { readonly [questionKey]: ResearchValidator<string> }
+declare const symbolDeepQuestions: { readonly [questionKey]: string }
+declare const callableResearchQuestions: (() => void) & {
+  readonly validKey: ResearchValidator<string>
+}
+declare const constructableDeepQuestions: (new () => object) & { readonly validKey: string }
 
-// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier must preserve public behavior for interface-declared question maps.
+// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier preserves interface-declared question maps.
 interface InterfaceResearchQuestions {
-  readonly accountFit: string
+  readonly accountFit: StandardJSONSchemaV1<unknown, boolean>
 }
 
-// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier must preserve public behavior for interface-declared configs.
+// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier preserves interface-declared configs.
 interface InterfaceResearchConfig {
-  readonly company: readonly ["name"]
-  readonly person: readonly ["title"]
-  readonly research: InterfaceResearchQuestions
+  readonly company: { readonly name: true }
+  readonly person: {
+    readonly research: InterfaceResearchQuestions
+    readonly title: true
+  }
   readonly ttl: "12h"
 }
-
-declare const interfaceResearchConfig: InterfaceResearchConfig
 
 type AliasResearchConfig = {
-  readonly company: readonly ["name"]
-  readonly person: readonly ["title"]
-  readonly research: { readonly accountFit: string }
+  readonly company: { readonly name: true }
+  readonly person: {
+    readonly research: { readonly accountFit: StandardJSONSchemaV1<unknown, boolean> }
+    readonly title: true
+  }
   readonly ttl: "12h"
 }
 
-// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier must preserve public behavior for interface-declared question maps.
+// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier preserves interface-declared deep maps.
 interface InterfaceDeepQuestions {
-  readonly integrationCount: string
+  readonly integrationNotes: string
 }
 
-// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier must preserve public behavior for interface-declared configs.
+// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier preserves interface-declared deep configs.
 interface InterfaceDeepConfig {
-  readonly company: readonly ["legalName"]
-  readonly deepResearch: InterfaceDeepQuestions
-  readonly person: readonly ["phone"]
+  readonly company: {
+    readonly deepResearch: InterfaceDeepQuestions
+    readonly legalName: true
+  }
+  readonly person: { readonly phone: true }
   readonly ttl: "365d"
 }
 
-type AliasDeepConfig = {
-  readonly company: readonly ["legalName"]
-  readonly deepResearch: { readonly integrationCount: string }
-  readonly person: readonly ["phone"]
-  readonly ttl: "365d"
-}
-
-type CallableQuestions = () => void
-type ConstructableQuestions = new () => object
-
-// oxlint-disable-next-line typescript/consistent-type-definitions -- This verifier must reject optional interface-declared question keys.
-interface OptionalInterfaceQuestions {
-  readonly maybe?: string
-}
-
-type HybridNumericQuestions = Readonly<Record<string, string>> & { readonly 0: string }
-type HybridSymbolQuestions = Readonly<Record<string, string>> & {
-  readonly [questionKey]: string
-}
-
-declare const aliasDeepConfig: AliasDeepConfig
 declare const aliasResearchConfig: AliasResearchConfig
-declare const callableQuestions: CallableQuestions
-declare const constructableQuestions: ConstructableQuestions
-declare const hybridNumericQuestions: HybridNumericQuestions
-declare const hybridSymbolQuestions: HybridSymbolQuestions
 declare const interfaceDeepConfig: InterfaceDeepConfig
-declare const optionalInterfaceQuestions: OptionalInterfaceQuestions
+declare const interfaceResearchConfig: InterfaceResearchConfig
 
 type ValidResearchUnionBranch = {
-  readonly company: readonly ["name"]
-  readonly person: readonly ["title"]
-  readonly research: { readonly goodKey: string }
+  readonly company: { readonly name: true }
+  readonly person: {
+    readonly research: { readonly goodKey: ResearchValidator<string> }
+    readonly title: true
+  }
+  readonly ttl: "12h"
+}
+type InvalidResearchUnionBranch = {
+  readonly company: { readonly name: true }
+  readonly person: {
+    readonly research: { readonly bad_key: ResearchValidator<string> }
+    readonly title: true
+  }
   readonly ttl: "12h"
 }
 type ValidDeepUnionBranch = {
-  readonly company: readonly ["legalName"]
-  readonly deepResearch: { readonly goodKey: string }
-  readonly person: readonly ["phone"]
+  readonly company: {
+    readonly deepResearch: { readonly goodKey: string }
+    readonly legalName: true
+  }
+  readonly person: { readonly phone: true }
   readonly ttl: "12h"
 }
-type ResearchReservedBranch = Omit<ValidResearchUnionBranch, "research"> & {
-  readonly research: { readonly person: string }
-}
-type ResearchMalformedBranch = Omit<ValidResearchUnionBranch, "research"> & {
-  readonly research: { readonly bad_key: string }
-}
-type ResearchOpenBranch = Omit<ValidResearchUnionBranch, "research"> & {
-  readonly research: Readonly<Record<string, string>>
-}
-type ResearchWrongTierBranch = Omit<ValidResearchUnionBranch, "research"> & {
-  readonly deepResearch: { readonly wrongTier: string }
-}
-type DeepReservedBranch = Omit<ValidDeepUnionBranch, "deepResearch"> & {
-  readonly deepResearch: { readonly company: string }
-}
-type DeepMalformedBranch = Omit<ValidDeepUnionBranch, "deepResearch"> & {
-  readonly deepResearch: { readonly bad_key: string }
-}
-type DeepOpenBranch = Omit<ValidDeepUnionBranch, "deepResearch"> & {
-  readonly deepResearch: Readonly<Record<string, string>>
-}
-type DeepWrongTierBranch = Omit<ValidDeepUnionBranch, "deepResearch"> & {
-  readonly research: { readonly wrongTier: string }
-}
-type ResearchNumericBranch = Omit<ValidResearchUnionBranch, "research"> & {
-  readonly research: typeof numericQuestions
-}
-type ResearchSymbolBranch = Omit<ValidResearchUnionBranch, "research"> & {
-  readonly research: typeof symbolQuestions
-}
-type DeepNumericBranch = Omit<ValidDeepUnionBranch, "deepResearch"> & {
-  readonly deepResearch: typeof numericQuestions
-}
-type DeepSymbolBranch = Omit<ValidDeepUnionBranch, "deepResearch"> & {
-  readonly deepResearch: typeof symbolQuestions
-}
-type UnionRejectionProps = {
-  readonly deepMalformed: ValidDeepUnionBranch | DeepMalformedBranch
-  readonly deepOpen: ValidDeepUnionBranch | DeepOpenBranch
-  readonly deepReserved: ValidDeepUnionBranch | DeepReservedBranch
-  readonly deepWrongTier: ValidDeepUnionBranch | DeepWrongTierBranch
-  readonly researchMalformed: ValidResearchUnionBranch | ResearchMalformedBranch
-  readonly researchOpen: ValidResearchUnionBranch | ResearchOpenBranch
-  readonly researchReserved: ValidResearchUnionBranch | ResearchReservedBranch
-  readonly researchWrongTier: ValidResearchUnionBranch | ResearchWrongTierBranch
+type InvalidDeepUnionBranch = {
+  readonly company: {
+    readonly deepResearch: { readonly bad_key: string }
+    readonly legalName: true
+  }
+  readonly person: { readonly phone: true }
+  readonly ttl: "12h"
 }
 
-const UnionRejectionProbe = ({
-  deepMalformed,
-  deepOpen,
-  deepReserved,
-  deepWrongTier,
-  researchMalformed,
-  researchOpen,
-  researchReserved,
-  researchWrongTier,
-}: UnionRejectionProps) => {
-  // @ts-expect-error -- a reserved research key cannot hide in a config union branch.
-  useSonar(researchReserved)
-  // @ts-expect-error -- a malformed research key cannot hide in a config union branch.
-  useSonar(researchMalformed)
-  // @ts-expect-error -- an open research map cannot hide in a config union branch.
-  useSonar(researchOpen)
-  // @ts-expect-error -- a wrong-tier namespace cannot hide in a research config union branch.
-  useSonar(researchWrongTier)
-  // @ts-expect-error -- a reserved deep key cannot hide in a config union branch.
-  useDeepSonar(deepReserved)
-  // @ts-expect-error -- a malformed deep key cannot hide in a config union branch.
-  useDeepSonar(deepMalformed)
-  // @ts-expect-error -- an open deep map cannot hide in a config union branch.
-  useDeepSonar(deepOpen)
-  // @ts-expect-error -- a wrong-tier namespace cannot hide in a deep config union branch.
-  useDeepSonar(deepWrongTier)
-  return null
-}
-
-type NonStringUnionRejectionProps = {
-  readonly deepNumeric: ValidDeepUnionBranch | DeepNumericBranch
-  readonly deepSymbol: ValidDeepUnionBranch | DeepSymbolBranch
-  readonly researchNumeric: ValidResearchUnionBranch | ResearchNumericBranch
-  readonly researchSymbol: ValidResearchUnionBranch | ResearchSymbolBranch
-}
-
-const NonStringUnionRejectionProbe = ({
-  deepNumeric,
-  deepSymbol,
-  researchNumeric,
-  researchSymbol,
-}: NonStringUnionRejectionProps) => {
-  // @ts-expect-error -- a numeric research key cannot hide in a config union branch.
-  useSonar(researchNumeric)
-  // @ts-expect-error -- a symbol research key cannot hide in a config union branch.
-  useSonar(researchSymbol)
-  // @ts-expect-error -- a numeric deep key cannot hide in a config union branch.
-  useDeepSonar(deepNumeric)
-  // @ts-expect-error -- a symbol deep key cannot hide in a config union branch.
-  useDeepSonar(deepSymbol)
-  return null
-}
+declare const researchUnion: InvalidResearchUnionBranch | ValidResearchUnionBranch
+declare const deepUnion: InvalidDeepUnionBranch | ValidDeepUnionBranch
 
 const useTypecheckPublicContract = () => {
-  const researchQuestionFragments = {
-    branded: {
-      sellsToSMB: question<boolean>("Does this company sell to SMBs?"),
+  const researchConfig = {
+    company: {
+      name: true,
+      research: { narrative: { description: "Summarize the company.", type: "string" } },
     },
-    plain: {
-      narrative: "Summarize the company.",
-    },
-  } as const
-  const nestedResearchConfig = {
-    company: ["name", "domain"],
-    person: ["title", "linkedin"],
-    research: {
-      ...researchQuestionFragments.branded,
-      ...researchQuestionFragments.plain,
+    person: {
+      linkedin: true,
+      research: { isTechnical: booleanValidator },
+      title: true,
     },
     ttl: "12h",
   } as const
-  const researchConfig = { ...nestedResearchConfig }
-  const research = useSonar(researchConfig)
+  const research = useSonar({ ...researchConfig })
   const interfaceResearch = useSonar(interfaceResearchConfig)
   const aliasResearch = useSonar(aliasResearchConfig)
 
   type ResearchData = NonNullable<typeof research.data>
   type InterfaceResearchData = NonNullable<typeof interfaceResearch.data>
   type AliasResearchData = NonNullable<typeof aliasResearch.data>
-  type _InterfaceResearchQuestion = Assert<
-    Equal<InterfaceResearchData["accountFit"], Field<JSONValue>>
+  type _ExactResearchKeys = Assert<Equal<keyof ResearchData, "company" | "person">>
+  type _ExactResearchPersonKeys = Assert<
+    Equal<keyof ResearchData["person"], "linkedin" | "research" | "title">
   >
-  type _AliasResearchQuestion = Assert<
-    Equal<AliasResearchData["accountFit"], InterfaceResearchData["accountFit"]>
+  type _ExactResearchCompanyKeys = Assert<Equal<keyof ResearchData["company"], "name" | "research">>
+  type _TypedValidator = Assert<
+    Equal<ResolvedValue<ResearchData["person"]["research"]["isTechnical"]>, boolean>
   >
-  type _CustomBoolean = Assert<Equal<ResolvedValue<ResearchData["sellsToSMB"]>, boolean>>
-  type _PlainQuestion = Assert<Equal<ResolvedValue<ResearchData["narrative"]>, JSONValue>>
-  type _CustomIsTopLevel = Assert<
-    Equal<"research" extends keyof ResearchData ? true : false, false>
+  type _RawJSONSchema = Assert<
+    Equal<ResolvedValue<ResearchData["company"]["research"]["narrative"]>, JSONValue>
   >
-  type _ExactResearchKeys = Assert<
-    Equal<keyof ResearchData, "company" | "narrative" | "person" | "sellsToSMB">
+  type _InterfaceQuestion = Assert<
+    Equal<ResolvedValue<InterfaceResearchData["person"]["research"]["accountFit"]>, boolean>
   >
-  type _ExactResearchPersonKeys = Assert<Equal<keyof ResearchData["person"], "linkedin" | "title">>
-  type _ExactResearchCompanyKeys = Assert<Equal<keyof ResearchData["company"], "domain" | "name">>
-  type _KnownFieldUsesSharedField = Assert<
-    ResearchData["person"]["title"] extends Field<string> ? true : false
+  type _AliasQuestion = Assert<
+    Equal<AliasResearchData["person"]["research"], InterfaceResearchData["person"]["research"]>
   >
-  type _FiniteResearchAnswerIsRequired = Assert<Equal<ResearchData["sellsToSMB"], Field<boolean>>>
+  type _KnownField = Assert<ResearchData["person"]["title"] extends Field<string> ? true : false>
   type _ResultKeys = Assert<
     Equal<keyof typeof research, "data" | "error" | "loading" | "resolve" | "status">
   >
   type _TypedError = Assert<Equal<typeof research.error, SonarClientError | null>>
   type _IdleStatus = Assert<Equal<typeof research.status, "pending" | "complete" | undefined>>
-  const researchBoolean: Field<boolean> | undefined = research.data?.sellsToSMB
-  const researchPlain: Field<JSONValue> | undefined = research.data?.narrative
+  const researchBoolean: Field<boolean> | undefined = research.data?.person.research.isTechnical
+  const researchJSON: Field<JSONValue> | undefined = research.data?.company.research.narrative
   expect(researchBoolean).toBeUndefined()
-  expect(researchPlain).toBeUndefined()
+  expect(researchJSON).toBeUndefined()
 
   const broadResearchConfig: ResearchConfig = researchConfig
   const broadResearch = useSonar(broadResearchConfig)
   type BroadResearchData = NonNullable<typeof broadResearch.data>
   type _BroadResearchPersonIsOptional = Assert<
-    Equal<BroadResearchData["person"]["title"], Field<string> | undefined>
+    BroadResearchData["person"]["title"] extends Field<string> | undefined ? true : false
   >
   type _BroadResearchCompanyIsOptional = Assert<
-    Equal<BroadResearchData["company"]["name"], Field<string> | undefined>
+    BroadResearchData["company"]["name"] extends Field<string> | undefined ? true : false
   >
   type _BroadResearchAnswerIsOptional = Assert<
-    Equal<BroadResearchData["arbitraryAnswer"], Field<JSONValue> | undefined>
+    NonNullable<BroadResearchData["person"]["research"]>["arbitraryAnswer"] extends
+      | Field<JSONValue>
+      | undefined
+      ? true
+      : false
   >
 
-  // @ts-expect-error -- an unselected research built-in cannot appear in the result.
+  // @ts-expect-error -- an unselected built-in cannot appear in the exact result.
   expect(research.data?.person.github).toBeUndefined()
-  // @ts-expect-error -- a branded boolean question cannot become a string field.
-  const _wrongResearchAnswer: Field<string> | undefined = research.data?.sellsToSMB
-  // @ts-expect-error -- only configured custom question keys appear in the result.
-  expect(research.data?.phantomAnswer).toBeUndefined()
+  // @ts-expect-error -- entity-owned questions never become top-level fields.
+  expect(research.data?.isTechnical).toBeUndefined()
+  // @ts-expect-error -- only configured research keys appear in the exact namespace.
+  expect(research.data?.person.research.phantomAnswer).toBeUndefined()
 
-  research.resolve({ linkedinURL: "https://linkedin.com/in/ada" })
-  research.resolve({ fullName: "Ada", xURL: "https://x.com/ada" })
-  research.resolve({
-    context: { plan: "enterprise", seats: 20 },
-    domain: "example.test",
-    email: "ada@example.test",
-    fullName: "Ada Lovelace",
-  })
-
-  const deepQuestionFragments = {
-    branded: {
-      usesQuickBooks: question<boolean>("Does it use QuickBooks?"),
+  const deepConfig = {
+    company: {
+      deepResearch: { vendorNotes: "Summarize its accounting stack." },
+      legalName: true,
     },
-    plain: {
-      accountingNotes: "Summarize its accounting stack.",
+    person: {
+      deepResearch: { careerHistory: "Summarize this person's career." },
+      phone: true,
     },
-  } as const
-  const nestedDeepConfig = {
-    company: ["legalName"],
-    deepResearch: {
-      ...deepQuestionFragments.branded,
-      ...deepQuestionFragments.plain,
-    },
-    person: ["phone"],
     ttl: "365d",
   } as const
-  const deepConfig = { ...nestedDeepConfig }
-  const deep = useDeepSonar(deepConfig)
+  const deep = useDeepSonar({ ...deepConfig })
   const interfaceDeep = useDeepSonar(interfaceDeepConfig)
-  const aliasDeep = useDeepSonar(aliasDeepConfig)
   type DeepData = NonNullable<typeof deep.data>
   type InterfaceDeepData = NonNullable<typeof interfaceDeep.data>
-  type AliasDeepData = NonNullable<typeof aliasDeep.data>
-  type _InterfaceDeepQuestion = Assert<
-    Equal<InterfaceDeepData["integrationCount"], Field<JSONValue>>
+  type _ExactDeepKeys = Assert<Equal<keyof DeepData, "company" | "person">>
+  type _ExactDeepPersonKeys = Assert<Equal<keyof DeepData["person"], "deepResearch" | "phone">>
+  type _ExactDeepCompanyKeys = Assert<
+    Equal<keyof DeepData["company"], "deepResearch" | "legalName">
   >
-  type _AliasDeepQuestion = Assert<
-    Equal<AliasDeepData["integrationCount"], InterfaceDeepData["integrationCount"]>
+  type _DeepAnswerIsString = Assert<
+    Equal<ResolvedValue<DeepData["company"]["deepResearch"]["vendorNotes"]>, string>
   >
-  type _DeepCustom = Assert<Equal<ResolvedValue<DeepData["usesQuickBooks"]>, boolean>>
-  type _DeepPlain = Assert<Equal<ResolvedValue<DeepData["accountingNotes"]>, JSONValue>>
-  type _ExactDeepKeys = Assert<
-    Equal<keyof DeepData, "accountingNotes" | "company" | "person" | "usesQuickBooks">
+  type _InterfaceDeepAnswer = Assert<
+    ResolvedValue<InterfaceDeepData["company"]["deepResearch"]["integrationNotes"]> extends string
+      ? true
+      : false
   >
-  type _ExactDeepPersonKeys = Assert<Equal<keyof DeepData["person"], "phone">>
-  type _ExactDeepCompanyKeys = Assert<Equal<keyof DeepData["company"], "legalName">>
-  type _FiniteDeepAnswerIsRequired = Assert<Equal<DeepData["usesQuickBooks"], Field<boolean>>>
-  const deepBoolean: Field<boolean> | undefined = deep.data?.usesQuickBooks
-  const deepPlain: Field<JSONValue> | undefined = deep.data?.accountingNotes
-  expect(deepBoolean).toBeUndefined()
-  expect(deepPlain).toBeUndefined()
+  const deepString: Field<string> | undefined = deep.data?.person.deepResearch.careerHistory
+  expect(deepString).toBeUndefined()
 
   const broadDeepConfig: DeepResearchConfig = deepConfig
   const broadDeep = useDeepSonar(broadDeepConfig)
   type BroadDeepData = NonNullable<typeof broadDeep.data>
   type _BroadDeepPersonIsOptional = Assert<
-    Equal<BroadDeepData["person"]["phone"], Field<string> | undefined>
-  >
-  type _BroadDeepCompanyIsOptional = Assert<
-    Equal<BroadDeepData["company"]["legalName"], Field<string> | undefined>
+    BroadDeepData["person"]["phone"] extends Field<string> | undefined ? true : false
   >
   type _BroadDeepAnswerIsOptional = Assert<
-    Equal<BroadDeepData["arbitraryAnswer"], Field<JSONValue> | undefined>
+    NonNullable<BroadDeepData["company"]["deepResearch"]>["arbitraryAnswer"] extends
+      | Field<string>
+      | undefined
+      ? true
+      : false
   >
 
-  // @ts-expect-error -- research built-ins never appear in a deep-research result.
-  expect(deep.data?.person.github).toBeUndefined()
-  // @ts-expect-error -- a branded boolean question cannot become a number field.
-  const _wrongDeepAnswer: Field<number> | undefined = deep.data?.usesQuickBooks
-  // @ts-expect-error -- only configured deep-research questions appear in the result.
-  expect(deep.data?.phantomAnswer).toBeUndefined()
-
-  // @ts-expect-error -- research cannot request the deep person catalog.
-  useSonar({ person: ["phone"], ttl: "12h" })
-  // @ts-expect-error -- research cannot request the deep company catalog.
-  useSonar({ company: ["legalName"], ttl: "12h" })
-  // @ts-expect-error -- deep research cannot request the research person catalog.
-  useDeepSonar({ person: ["title"], ttl: "12h" })
-  // @ts-expect-error -- deep research cannot request the research company catalog.
-  useDeepSonar({ company: ["funding"], ttl: "12h" })
-  // @ts-expect-error -- each tier accepts only its matching question namespace.
-  useSonar({ deepResearch: { score: question<number>("Score it.") }, ttl: "12h" })
-  // @ts-expect-error -- each tier accepts only its matching question namespace.
-  useDeepSonar({ research: { score: question<number>("Score it.") }, ttl: "12h" })
-  // @ts-expect-error -- a custom key must be a camelCase identifier.
-  useSonar({ research: { SellsToSMB: question<boolean>("Does it?") }, ttl: "12h" })
-  // @ts-expect-error -- reserved config keys cannot become custom result keys.
-  useSonar({ research: { person: question<string>("Who is the person?") }, ttl: "12h" })
-  // @ts-expect-error -- reserved config keys cannot become deep custom result keys.
-  useDeepSonar({ deepResearch: { company: question<string>("Which company?") }, ttl: "12h" })
-  // @ts-expect-error -- research question maps cannot contain numeric keys.
-  useSonar({ ...researchConfig, research: numericQuestions })
-  // @ts-expect-error -- deep question maps cannot contain numeric keys.
-  useDeepSonar({ ...deepConfig, deepResearch: numericQuestions })
-  // @ts-expect-error -- research question maps cannot contain symbol-only keys.
-  useSonar({ ...researchConfig, research: symbolQuestions })
-  // @ts-expect-error -- deep question maps cannot contain symbol-only keys.
-  useDeepSonar({ ...deepConfig, deepResearch: symbolQuestions })
+  // @ts-expect-error -- a research hook cannot select a deep-research built-in.
+  useSonar({ company: {}, person: { phone: true }, ttl: "12h" })
+  // @ts-expect-error -- a deep hook cannot select a research built-in.
+  useDeepSonar({ company: {}, person: { title: true }, ttl: "12h" })
+  // @ts-expect-error -- research cannot accept a deep-research namespace.
+  useSonar({ company: {}, person: { deepResearch: { score: "Score it." } }, ttl: "12h" })
+  // @ts-expect-error -- deep research cannot accept a research namespace.
+  useDeepSonar({ company: { research: { score: booleanValidator } }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- research questions require a JSON-Schema-capable validator.
+  useSonar({ company: { research: { score: "Score it." } }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- deep-research questions are plain prompts, not validators.
+  useDeepSonar({ company: { deepResearch: { score: booleanValidator } }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- a custom key must be a lower-camel identifier.
+  useSonar({ company: { research: { BadKey: booleanValidator } }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- reserved config keys cannot become research answer keys.
+  useSonar({ company: { research: { person: booleanValidator } }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- research maps cannot contain numeric keys.
+  useSonar({ company: { research: numericQuestions }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- research maps cannot contain symbol keys.
+  useSonar({ company: {}, person: { research: symbolResearchQuestions }, ttl: "12h" })
+  // @ts-expect-error -- deep-research maps cannot contain symbol keys.
+  useDeepSonar({ company: { deepResearch: symbolDeepQuestions }, person: {}, ttl: "12h" })
   // @ts-expect-error -- finite research question keys cannot be optional.
-  useSonar({ ...researchConfig, research: optionalQuestions })
-  // @ts-expect-error -- finite deep question keys cannot be optional.
-  useDeepSonar({ ...deepConfig, deepResearch: optionalQuestions })
-  // @ts-expect-error -- interface-declared research question keys cannot be optional.
-  useSonar({ ...researchConfig, research: optionalInterfaceQuestions })
-  // @ts-expect-error -- interface-declared deep question keys cannot be optional.
-  useDeepSonar({ ...deepConfig, deepResearch: optionalInterfaceQuestions })
+  useSonar({ company: { research: optionalResearchQuestions }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- finite deep-research question keys cannot be optional.
+  useDeepSonar({ company: {}, person: { deepResearch: optionalDeepQuestions }, ttl: "12h" })
   // @ts-expect-error -- callable objects are not research question maps.
-  useSonar({ ...researchConfig, research: callableQuestions })
-  // @ts-expect-error -- callable objects are not deep question maps.
-  useDeepSonar({ ...deepConfig, deepResearch: callableQuestions })
-  // @ts-expect-error -- constructable objects are not research question maps.
-  useSonar({ ...researchConfig, research: constructableQuestions })
-  // @ts-expect-error -- constructable objects are not deep question maps.
-  useDeepSonar({ ...deepConfig, deepResearch: constructableQuestions })
-  // @ts-expect-error -- a broad research map cannot add a numeric key.
-  useSonar({ ...researchConfig, research: hybridNumericQuestions })
-  // @ts-expect-error -- a broad deep map cannot add a numeric key.
-  useDeepSonar({ ...deepConfig, deepResearch: hybridNumericQuestions })
-  // @ts-expect-error -- a broad research map cannot add a symbol key.
-  useSonar({ ...researchConfig, research: hybridSymbolQuestions })
-  // @ts-expect-error -- a broad deep map cannot add a symbol key.
-  useDeepSonar({ ...deepConfig, deepResearch: hybridSymbolQuestions })
+  useSonar({ company: { research: callableResearchQuestions }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- constructable objects are not deep-research question maps.
+  useDeepSonar({ company: { deepResearch: constructableDeepQuestions }, person: {}, ttl: "12h" })
+  // @ts-expect-error -- a union cannot hide an invalid research branch.
+  useSonar(researchUnion)
+  // @ts-expect-error -- a union cannot hide an invalid deep-research branch.
+  useDeepSonar(deepUnion)
 
-  useSonar({ ...researchConfig, research: {} })
-  useDeepSonar({ ...deepConfig, deepResearch: {} })
-
-  expect(UnionRejectionProbe).toBeFunction()
-  expect(NonStringUnionRejectionProbe).toBeFunction()
+  useSonar({ company: { research: {} }, person: {}, ttl: "12h" })
+  useDeepSonar({ company: {}, person: { deepResearch: {} }, ttl: "12h" })
 
   // @ts-expect-error -- the minimum TTL is twelve hours.
-  useSonar({ person: ["title"], ttl: "11h" })
+  useSonar({ company: {}, person: { title: true }, ttl: "11h" })
   // @ts-expect-error -- the maximum TTL is one year.
-  useSonar({ person: ["title"], ttl: "366d" })
+  useSonar({ company: {}, person: { title: true }, ttl: "366d" })
 
+  research.resolve({ linkedinURL: "https://linkedin.com/in/ada" })
+  research.resolve({ fullName: "Ada", xURL: "https://x.com/ada" })
+  research.resolve({ email: "ada@example.test", fullName: "Ada Lovelace" })
   // @ts-expect-error -- email alone is not an identity branch.
   research.resolve({ email: "ada@example.test" })
   // @ts-expect-error -- fullName alone is not an identity branch.
   research.resolve({ fullName: "Ada Lovelace" })
-  // @ts-expect-error -- domain is context, not a complete identity branch.
+  // @ts-expect-error -- domain is supporting context, not a complete identity branch.
   research.resolve({ domain: "example.test" })
-  // @ts-expect-error -- xURL requires fullName.
-  research.resolve({ xURL: "https://x.com/ada" })
   // @ts-expect-error -- context must contain JSON values.
-  research.resolve({
-    context: { callback: () => {} },
-    email: "ada@example.test",
-    fullName: "Ada Lovelace",
-  })
+  research.resolve({ context: { callback: () => {} }, linkedinURL: "https://example.test" })
 
   // @ts-expect-error -- the provider requires a valid SonarClient Layer.
   createElement(SonarProvider, { layer: null }, null)

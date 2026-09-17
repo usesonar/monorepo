@@ -3,22 +3,23 @@
 import { expect, test } from "bun:test"
 
 import type { KyInstance } from "ky"
+import { z } from "zod"
 
 import {
+  compileResearchRequest,
   createDeepResearch,
   createResearch,
   createSonar,
-  question,
   retrieveSonar,
 } from "./index.ts"
 import type {
-  AnswerOf,
-  DeepResearchRequest,
+  DeepResearchInput,
   Field,
   JSONValue,
-  Question,
-  ResearchRequest,
+  ResearchInput,
+  ResearchOutput,
   SonarResponse,
+  StandardJSONSchemaV1,
 } from "./index.ts"
 
 type Equal<Left, Right> =
@@ -27,27 +28,8 @@ type Equal<Left, Right> =
     : false
 type Expect<Type extends true> = Type
 
-// oxlint-disable-next-line typescript/no-explicit-any -- This adversarial probe proves explicit `any` cannot bypass API selection validation.
-type AnySelection = any
-
-type BrandedSingletonUnion<Value extends string> =
-  | (Value & { readonly selectionBrand: "first" })
-  | (Value & { readonly selectionBrand: "second" })
-
-type AccountSignals = {
-  intent: "low" | "medium" | "high"
-  evidence: string[]
-}
-
-type RiskAssessment = {
-  score: number
-  factors: string[]
-}
-
-type RegulatoryStatus = {
-  registered: boolean
-  jurisdictions: string[]
-}
+type AccountSignals = { intent: "low" | "medium" | "high"; evidence: string[] }
+type RiskAssessment = { score: number; factors: string[] }
 
 declare const customQuestionSymbol: unique symbol
 declare const reservedQuestionUnion: { goodKey: string } | { person: string }
@@ -56,209 +38,154 @@ declare const validQuestionUnion: { firstAnswer: string } | { secondAnswer: stri
 declare const optionalQuestions: { maybe?: string }
 declare const numericQuestions: { 1: string }
 declare const symbolOnlyQuestions: { readonly [customQuestionSymbol]: string }
-declare const mutableAnySelection: [AnySelection]
-declare const readonlyAnySelection: readonly [AnySelection]
 
-const accountSignalsQuestion = question<AccountSignals>("What public buying signals exist?")
-const nestedResearchQuestions = {
-  accountSignals: accountSignalsQuestion,
-  riskAssessment: question<RiskAssessment>("Which public risk factors exist?"),
+const riskAssessment: StandardJSONSchemaV1<unknown, RiskAssessment> = {
+  "~standard": {
+    version: 1,
+    vendor: "fixture",
+    types: undefined,
+    jsonSchema: {
+      input: () => ({ description: "Which public risk factors exist?", type: "object" }),
+      output: () => ({
+        description: "Which public risk factors exist?",
+        type: "object",
+        properties: {
+          score: { type: "number" },
+          factors: { type: "array", items: { type: "string" } },
+        },
+        required: ["score", "factors"],
+        additionalProperties: false,
+      }),
+    },
+  },
 }
-const mixedResearchQuestions = {
-  ...nestedResearchQuestions,
-  defaultTyped: question("Return a JSON-compatible answer."),
-  plainNarrative: "Summarize the public narrative.",
-  extraRuntime: "Return any additional public evidence.",
-}
+
+const accountSignals = z
+  .object({ intent: z.enum(["low", "medium", "high"]), evidence: z.array(z.string()) })
+  .describe("What public buying signals exist?")
+
 const researchRequest = {
   seed: { fullName: "Ada Lovelace", email: "ada@example.com" },
   ttl: "12h",
-  person: ["title"],
-  company: ["colors", "funding"],
-  research: { ...mixedResearchQuestions },
-} as const
-const spreadResearchRequest = {
-  ...researchRequest,
-  research: { ...researchRequest.research },
+  person: {
+    title: true,
+    research: {
+      accountSignals,
+      publicNarrative: { description: "Summarize the public narrative.", type: "string" },
+    },
+  },
+  company: {
+    colors: true,
+    funding: true,
+    research: { accountSignals: riskAssessment },
+  },
 } as const
 
-const deepQuestions = {
-  regulatoryStatus: question<RegulatoryStatus>("What is the current regulatory status?"),
-  plainDeepAnswer: "What else is publicly known?",
-}
 const deepResearchRequest = {
   seed: { fullName: "Ada Lovelace", xURL: "https://x.com/ada" },
   ttl: "7d",
-  person: ["phone"],
-  company: ["legalName"],
-  deepResearch: { ...deepQuestions },
+  person: {
+    phone: true,
+    deepResearch: { background: "Summarize the person's professional background." },
+  },
+  company: {
+    legalName: true,
+    deepResearch: { background: "Summarize the company's history." },
+  },
 } as const
 
-const broadResearchRequest: ResearchRequest = {
+const broadResearchRequest: ResearchInput = {
   seed: { fullName: "Ada Lovelace", email: "ada@example.com" },
   ttl: "12h",
-  person: ["title"],
-  company: ["colors"],
-  research: { runtimeAnswer: "Return public runtime evidence." },
+  person: {
+    title: true,
+    research: {
+      runtimeAnswer: { description: "Return public runtime evidence.", type: "object" },
+    },
+  },
+  company: { colors: true },
 }
-const broadDeepResearchRequest: DeepResearchRequest = {
+
+const broadDeepResearchRequest: DeepResearchInput = {
   seed: { fullName: "Ada Lovelace", xURL: "https://x.com/ada" },
   ttl: "7d",
-  person: ["phone"],
-  company: ["legalName"],
-  deepResearch: { runtimeDeepAnswer: "Return public deep-research evidence." },
+  person: { phone: true },
+  company: {
+    legalName: true,
+    deepResearch: { runtimeDeepAnswer: "Return public deep-research evidence." },
+  },
 }
 
 const verifyTypeContract = (client: KyInstance) => {
-  const research = createResearch(client, spreadResearchRequest)
-  const deep = createDeepResearch(client, { ...deepResearchRequest })
+  const research = createResearch(client, researchRequest)
+  const deep = createDeepResearch(client, deepResearchRequest)
   const broadResearch = createResearch(client, broadResearchRequest)
   const broadDeep = createDeepResearch(client, broadDeepResearchRequest)
   const retrieved = retrieveSonar(client, "sonar_hash_123")
   const typedRetrieved = retrieveSonar<{
-    accountSignals: AccountSignals
-    plainCustom: JSONValue
+    person: { research: { accountSignals: AccountSignals } }
+    company: { deepResearch: { background: string } }
   }>(client, "sonar_hash_123")
-  const createTupleUnionResearch = (
-    person: readonly ["title"] | readonly ["github"],
-    company: readonly ["name"] | readonly ["location"]
-  ) => createResearch(client, { ...spreadResearchRequest, person, company })
-  const createUnionElementResearch = (
-    person: readonly ["title" | "github"],
-    company: readonly ["name" | "location"]
-  ) => createResearch(client, { ...spreadResearchRequest, person, company })
-  const createUnionElementDeepResearch = (
-    person: readonly [BrandedSingletonUnion<"phone">],
-    company: readonly [BrandedSingletonUnion<"legalName">]
-  ) => createDeepResearch(client, { ...deepResearchRequest, person, company })
 
   type ResearchResponse = Awaited<typeof research>
   type DeepResponse = Awaited<typeof deep>
   type BroadResearchResponse = Awaited<typeof broadResearch>
   type BroadDeepResponse = Awaited<typeof broadDeep>
-  type TupleUnionResponse = Awaited<ReturnType<typeof createTupleUnionResearch>>
-  type UnionElementResearchResponse = Awaited<ReturnType<typeof createUnionElementResearch>>
-  type UnionElementDeepResearchResponse = Awaited<ReturnType<typeof createUnionElementDeepResearch>>
   type RetrievedResponse = Awaited<typeof retrieved>
   type TypedRetrievedResponse = Awaited<typeof typedRetrieved>
   type _ResearchIsResponse = Expect<ResearchResponse extends SonarResponse ? true : false>
   type _DeepIsResponse = Expect<DeepResponse extends SonarResponse ? true : false>
-  type _QuestionIsString = Expect<Question<AccountSignals> extends string ? true : false>
-  type _QuestionCarriesAnswer = Expect<
-    Equal<AnswerOf<typeof accountSignalsQuestion>, AccountSignals>
+  type _ZodOutput = Expect<Equal<ResearchOutput<typeof accountSignals>, AccountSignals>>
+  type _StandardOutput = Expect<Equal<ResearchOutput<typeof riskAssessment>, RiskAssessment>>
+  type _SelectedPersonOnly = Expect<
+    Equal<Exclude<keyof ResearchResponse["data"]["person"], "research">, "title">
   >
-  type _SelectedPersonOnly = Expect<Equal<keyof ResearchResponse["data"]["person"], "title">>
   type _SelectedCompanyOnly = Expect<
-    Equal<keyof ResearchResponse["data"]["company"], "colors" | "funding">
+    Equal<Exclude<keyof ResearchResponse["data"]["company"], "research">, "colors" | "funding">
   >
   type _BuiltInString = Expect<Equal<ResearchResponse["data"]["person"]["title"], Field<string>>>
-  type _RichColors = Expect<Equal<ResearchResponse["data"]["company"]["colors"], Field<JSONValue>>>
-  type _RichFunding = Expect<
-    Equal<ResearchResponse["data"]["company"]["funding"], Field<JSONValue>>
+  type _ZodAnswer = Expect<
+    Equal<ResearchResponse["data"]["person"]["research"]["accountSignals"], Field<AccountSignals>>
   >
-  type _BrandedAccountSignals = Expect<
-    Equal<ResearchResponse["data"]["accountSignals"], Field<AccountSignals>>
+  type _RawSchemaAnswer = Expect<
+    Equal<ResearchResponse["data"]["person"]["research"]["publicNarrative"], Field<JSONValue>>
   >
-  type _BrandedRiskAssessment = Expect<
-    Equal<ResearchResponse["data"]["riskAssessment"], Field<RiskAssessment>>
+  type _SameKeyDifferentEntity = Expect<
+    Equal<ResearchResponse["data"]["company"]["research"]["accountSignals"], Field<RiskAssessment>>
   >
-  type _DefaultQuestionAnswer = Expect<
-    Equal<ResearchResponse["data"]["defaultTyped"], Field<JSONValue>>
+  type _DeepPersonAnswer = Expect<
+    Equal<DeepResponse["data"]["person"]["deepResearch"]["background"], Field<string>>
   >
-  type _PlainQuestionAnswer = Expect<
-    Equal<ResearchResponse["data"]["plainNarrative"], Field<JSONValue>>
+  type _DeepCompanyAnswer = Expect<
+    Equal<DeepResponse["data"]["company"]["deepResearch"]["background"], Field<string>>
   >
-  type _ExtraRuntimeAnswer = Expect<
-    Equal<ResearchResponse["data"]["extraRuntime"], Field<JSONValue>>
+  type _BroadResearchBuiltInOptional = Expect<
+    Equal<BroadResearchResponse["data"]["person"]["title"], Field<string> | undefined>
   >
-  type _AllMixedQuestionsRemain = Expect<
+  type _BroadResearchNamespaceOptional = Expect<
     Equal<
-      Exclude<keyof ResearchResponse["data"], "person" | "company">,
-      "accountSignals" | "riskAssessment" | "defaultTyped" | "plainNarrative" | "extraRuntime"
+      BroadResearchResponse["data"]["person"]["research"],
+      Readonly<Record<string, Field<JSONValue> | undefined>> | undefined
     >
   >
-  type _DeepSelectedPersonOnly = Expect<Equal<keyof DeepResponse["data"]["person"], "phone">>
-  type _DeepSelectedCompanyOnly = Expect<Equal<keyof DeepResponse["data"]["company"], "legalName">>
-  type _DeepBuiltIn = Expect<Equal<DeepResponse["data"]["company"]["legalName"], Field<string>>>
-  type _DeepBrandedAnswer = Expect<
-    Equal<DeepResponse["data"]["regulatoryStatus"], Field<RegulatoryStatus>>
-  >
-  type _DeepPlainAnswer = Expect<Equal<DeepResponse["data"]["plainDeepAnswer"], Field<JSONValue>>>
-  type _BroadResearchPersonKeys = Expect<
-    Equal<keyof BroadResearchResponse["data"]["person"], "linkedin" | "title" | "x" | "github">
-  >
-  type _BroadResearchPersonFieldsAreOptional = Expect<
-    Equal<BroadResearchResponse["data"]["person"]["github"], Field<string> | undefined>
-  >
-  type _BroadResearchCompanyKeys = Expect<
+  type _BroadDeepNamespaceOptional = Expect<
     Equal<
-      keyof BroadResearchResponse["data"]["company"],
-      "domain" | "name" | "logo" | "colors" | "location" | "description" | "funding"
+      BroadDeepResponse["data"]["company"]["deepResearch"],
+      Readonly<Record<string, Field<string> | undefined>> | undefined
     >
-  >
-  type _BroadResearchCompanyFieldsAreOptional = Expect<
-    Equal<BroadResearchResponse["data"]["company"]["location"], Field<JSONValue> | undefined>
-  >
-  type _BroadResearchAnswerIsJSON = Expect<
-    Equal<BroadResearchResponse["data"]["runtimeAnswer"], Field<JSONValue> | undefined>
-  >
-  type _BroadDeepPersonFieldIsOptional = Expect<
-    Equal<BroadDeepResponse["data"]["person"]["phone"], Field<string> | undefined>
-  >
-  type _BroadDeepCompanyFieldIsOptional = Expect<
-    Equal<BroadDeepResponse["data"]["company"]["legalName"], Field<string> | undefined>
-  >
-  type _BroadDeepAnswerIsJSON = Expect<
-    Equal<BroadDeepResponse["data"]["runtimeDeepAnswer"], Field<JSONValue> | undefined>
-  >
-  type _TupleUnionPersonSelectionDistributes = Expect<
-    Equal<
-      TupleUnionResponse["data"]["person"],
-      { title: Field<string> } | { github: Field<string> }
-    >
-  >
-  type _TupleUnionCompanySelectionDistributes = Expect<
-    Equal<
-      TupleUnionResponse["data"]["company"],
-      { name: Field<string> } | { location: Field<JSONValue> }
-    >
-  >
-  type _UnionElementResearchPersonSelectionIsOptional = Expect<
-    Equal<
-      UnionElementResearchResponse["data"]["person"],
-      { title?: Field<string>; github?: Field<string> }
-    >
-  >
-  type _UnionElementResearchCompanySelectionIsOptional = Expect<
-    Equal<
-      UnionElementResearchResponse["data"]["company"],
-      { name?: Field<string>; location?: Field<JSONValue> }
-    >
-  >
-  type _UnionElementDeepPersonSelectionIsOptional = Expect<
-    Equal<UnionElementDeepResearchResponse["data"]["person"], { phone?: Field<string> }>
-  >
-  type _UnionElementDeepCompanySelectionIsOptional = Expect<
-    Equal<UnionElementDeepResearchResponse["data"]["company"], { legalName?: Field<string> }>
   >
   type _RetrieveDataIsClosed = Expect<Equal<keyof RetrievedResponse["data"], "person" | "company">>
-  type _RetrieveStringBuiltIn = Expect<
-    Equal<RetrievedResponse["data"]["person"]["title"], Field<string> | undefined>
+  type _RetrieveDefaultHasNoResearch = Expect<
+    Equal<Extract<"research", keyof RetrievedResponse["data"]["person"]>, never>
   >
-  type _RetrieveRichBuiltIn = Expect<
-    Equal<RetrievedResponse["data"]["company"]["colors"], Field<JSONValue> | undefined>
-  >
-  type _RetrieveTypedDataKeys = Expect<
+  type _RetrieveTypedPerson = Expect<
     Equal<
-      keyof TypedRetrievedResponse["data"],
-      "person" | "company" | "accountSignals" | "plainCustom"
+      TypedRetrievedResponse["data"]["person"]["research"]["accountSignals"],
+      Field<AccountSignals>
     >
   >
-  type _RetrieveTypedCustom = Expect<
-    Equal<TypedRetrievedResponse["data"]["accountSignals"], Field<AccountSignals>>
-  >
-  type _RetrieveJSONCustom = Expect<
-    Equal<TypedRetrievedResponse["data"]["plainCustom"], Field<JSONValue>>
+  type _RetrieveTypedDeep = Expect<
+    Equal<TypedRetrievedResponse["data"]["company"]["deepResearch"]["background"], Field<string>>
   >
 
   // @ts-expect-error unselected research built-ins do not appear in configured results.
@@ -266,111 +193,72 @@ const verifyTypeContract = (client: KyInstance) => {
   // @ts-expect-error unselected deep-research built-ins do not appear in configured results.
   deep.then((response) => response.data.company.name)
   // @ts-expect-error default retrieval has no config from which to infer custom answer keys.
-  retrieved.then((response) => response.data.accountSignals)
-  // @ts-expect-error nested built-in catalogs remain closed to provider or custom keys.
-  retrieved.then((response) => response.data.person.providerInternal)
-
+  retrieved.then((response) => response.data.person.research)
   // @ts-expect-error phone is a deepResearch person field.
-  createResearch(client, { ...spreadResearchRequest, person: ["phone"] as const })
+  createResearch(client, { ...researchRequest, person: { phone: true } })
   // @ts-expect-error title is a research person field.
-  createDeepResearch(client, { ...deepResearchRequest, person: ["title"] as const })
-  // @ts-expect-error legalName is a deepResearch company field.
-  createResearch(client, { ...spreadResearchRequest, company: ["legalName"] as const })
-  // @ts-expect-error name is a research company field.
-  createDeepResearch(client, { ...deepResearchRequest, company: ["name"] as const })
-  // @ts-expect-error a mutable any-valued tuple cannot bypass research person selection validation.
-  createResearch(client, { ...spreadResearchRequest, person: mutableAnySelection })
-  // @ts-expect-error a readonly any-valued tuple cannot bypass research person selection validation.
-  createResearch(client, { ...spreadResearchRequest, person: readonlyAnySelection })
-  // @ts-expect-error a mutable any-valued tuple cannot bypass research company selection validation.
-  createResearch(client, { ...spreadResearchRequest, company: mutableAnySelection })
-  // @ts-expect-error a readonly any-valued tuple cannot bypass research company selection validation.
-  createResearch(client, { ...spreadResearchRequest, company: readonlyAnySelection })
-  // @ts-expect-error a mutable any-valued tuple cannot bypass deep person selection validation.
-  createDeepResearch(client, { ...deepResearchRequest, person: mutableAnySelection })
-  // @ts-expect-error a readonly any-valued tuple cannot bypass deep person selection validation.
-  createDeepResearch(client, { ...deepResearchRequest, person: readonlyAnySelection })
-  // @ts-expect-error a mutable any-valued tuple cannot bypass deep company selection validation.
-  createDeepResearch(client, { ...deepResearchRequest, company: mutableAnySelection })
-  // @ts-expect-error a readonly any-valued tuple cannot bypass deep company selection validation.
-  createDeepResearch(client, { ...deepResearchRequest, company: readonlyAnySelection })
-  // @ts-expect-error a research request cannot carry the deepResearch slot.
-  createResearch(client, { ...spreadResearchRequest, deepResearch: { wrongTier: "No" } })
-  // @ts-expect-error a deep request cannot carry the research slot.
-  createDeepResearch(client, { ...deepResearchRequest, research: { wrongTier: "No" } })
-  // @ts-expect-error a fullName is required alongside email.
-  createResearch(client, { ...spreadResearchRequest, seed: { email: "ada@example.com" } })
-  // @ts-expect-error reserved custom keys fail at compile time.
-  createResearch(client, { ...spreadResearchRequest, research: { person: "No" } })
-  // @ts-expect-error non-camelCase custom keys fail at compile time.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: { snake_case: "No" } })
-  // @ts-expect-error research question maps cannot hide a reserved key in a union branch.
-  createResearch(client, { ...spreadResearchRequest, research: reservedQuestionUnion })
-  // @ts-expect-error deep question maps cannot hide a reserved key in a union branch.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: reservedQuestionUnion })
-  // @ts-expect-error research question maps cannot hide a malformed key in a union branch.
-  createResearch(client, { ...spreadResearchRequest, research: malformedQuestionUnion })
-  // @ts-expect-error deep question maps cannot hide a malformed key in a union branch.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: malformedQuestionUnion })
-  // @ts-expect-error research question maps cannot be unions, even when every branch is valid.
-  createResearch(client, { ...spreadResearchRequest, research: validQuestionUnion })
-  // @ts-expect-error deep question maps cannot be unions, even when every branch is valid.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: validQuestionUnion })
-  // @ts-expect-error research question maps require every declared key.
-  createResearch(client, { ...spreadResearchRequest, research: optionalQuestions })
-  // @ts-expect-error deep question maps require every declared key.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: optionalQuestions })
-  // @ts-expect-error research question maps cannot contain numeric keys.
-  createResearch(client, { ...spreadResearchRequest, research: numericQuestions })
-  // @ts-expect-error deep question maps cannot contain numeric keys.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: numericQuestions })
-  // @ts-expect-error research question maps cannot contain symbol-only keys.
-  createResearch(client, { ...spreadResearchRequest, research: symbolOnlyQuestions })
-  // @ts-expect-error deep question maps cannot contain symbol-only keys.
-  createDeepResearch(client, { ...deepResearchRequest, deepResearch: symbolOnlyQuestions })
-  // @ts-expect-error retrieval custom-answer maps must enumerate finite keys.
-  retrieveSonar<Record<string, JSONValue>>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval custom-answer maps cannot contain reserved result keys.
-  retrieveSonar<{ person: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval custom-answer maps require lower-camel keys.
-  retrieveSonar<{ snake_case: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval custom-answer maps require every declared key.
-  retrieveSonar<{ maybe?: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval custom-answer maps cannot contain numeric keys.
-  retrieveSonar<{ 1: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval custom-answer maps cannot contain symbol-only keys.
-  retrieveSonar<{ readonly [customQuestionSymbol]: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval custom-answer maps cannot be unions, even when each branch is valid.
-  retrieveSonar<{ alphaAnswer: string } | { betaAnswer: number }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval answer maps cannot hide a reserved key in a union branch.
-  retrieveSonar<{ goodKey: string } | { person: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval answer maps cannot hide a malformed key in a union branch.
-  retrieveSonar<{ goodKey: string } | { BadKey: string }>(client, "sonar_hash_123")
-  // @ts-expect-error retrieval answer maps cannot hide an open record in a union branch.
-  retrieveSonar<{ goodKey: string } | Record<string, JSONValue>>(client, "sonar_hash_123")
-  // @ts-expect-error a configured client requires one capability key.
-  createSonar({ baseURL: "https://api.example.test" })
-  // @ts-expect-error publishableKey and secretKey are mutually exclusive.
-  createSonar({
-    baseURL: "https://api.example.test",
-    publishableKey: "pk_test_verify",
-    secretKey: "sk_verify",
+  createDeepResearch(client, { ...deepResearchRequest, person: { title: true } })
+  createResearch(client, {
+    ...researchRequest,
+    // @ts-expect-error raw JSON Schema requires a root description.
+    person: { research: { missingPrompt: { type: "string" } } },
   })
+  createResearch(client, {
+    ...researchRequest,
+    person: {
+      research: {
+        schemaOnly: {
+          // @ts-expect-error ordinary Standard Schema validators without JSON Schema conversion are rejected.
+          "~standard": {
+            version: 1,
+            vendor: "fixture",
+            validate: <Value>(value: Value) => ({ value }),
+          },
+        },
+      },
+    },
+  })
+  createDeepResearch(client, {
+    ...deepResearchRequest,
+    // @ts-expect-error deepResearch accepts plain prompts, not research validators.
+    person: { deepResearch: { wrong: accountSignals } },
+  })
+  // @ts-expect-error research question maps cannot hide a reserved key in a union branch.
+  createResearch(client, { ...researchRequest, person: { research: reservedQuestionUnion } })
+  // @ts-expect-error deep question maps cannot hide a malformed key in a union branch.
+  createDeepResearch(client, {
+    ...deepResearchRequest,
+    person: { deepResearch: malformedQuestionUnion },
+  })
+  // @ts-expect-error question maps cannot be unions, even when every branch is valid.
+  createDeepResearch(client, {
+    ...deepResearchRequest,
+    person: { deepResearch: validQuestionUnion },
+  })
+  // @ts-expect-error question maps require every declared key.
+  createDeepResearch(client, {
+    ...deepResearchRequest,
+    person: { deepResearch: optionalQuestions },
+  })
+  // @ts-expect-error question maps cannot contain numeric keys.
+  createDeepResearch(client, { ...deepResearchRequest, person: { deepResearch: numericQuestions } })
+  // @ts-expect-error question maps cannot contain symbol-only keys.
+  createDeepResearch(client, {
+    ...deepResearchRequest,
+    person: { deepResearch: symbolOnlyQuestions },
+  })
+  // @ts-expect-error retrieval maps must be nested under entity and tier namespaces.
+  retrieveSonar<{ accountSignals: AccountSignals }>(client, "sonar_hash_123")
 
-  return {
-    research,
-    deep,
-    broadResearch,
-    broadDeep,
-    retrieved,
-    typedRetrieved,
-  } as const
+  return { research, deep, broadResearch, broadDeep, retrieved, typedRetrieved } as const
 }
 
 test("V-API-05 compile-time public contract is exercised by TypeScript", () => {
   expect(verifyTypeContract).toBeFunction()
-  const prompt: string = question("What is the JSON answer?")
-  expect(prompt).toBe("What is the JSON answer?")
+  const compiled = compileResearchRequest(researchRequest)
+  expect(compiled.person.research?.accountSignals?.description).toBe(
+    "What public buying signals exist?"
+  )
 
   const client: KyInstance = createSonar({
     baseURL: "https://api.example.test",

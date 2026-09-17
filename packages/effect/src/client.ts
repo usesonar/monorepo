@@ -1,22 +1,31 @@
 import {
   DeepResearchRequest as APIDeepResearchRequest,
-  ResearchRequest as APIResearchRequest,
   SonarStreamError,
+  compileResearchRequest,
   createSonar,
   retrieveSonar,
   streamDeepResearch,
   streamResearch,
 } from "@usesonar/api"
 import type {
+  DeepResearchCompanyInput as APIDeepResearchCompanyInput,
+  DeepResearchPersonInput as APIDeepResearchPersonInput,
+  Field as APIField,
+  ResearchCompanyInput as APIResearchCompanyInput,
+  ResearchPersonInput as APIResearchPersonInput,
   SonarEvent as APISonarEvent,
   SonarResponse as APISonarResponse,
-  ValidQuestions,
+  ValidDeepResearchQuestions as APIValidDeepResearchQuestions,
+  ValidResearchQuestions as APIValidResearchQuestions,
+  ResearchRequest as APIResearchRequest,
 } from "@usesonar/api"
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect"
 
 import { HTTPError, ProtocolError, RequestError, TransportError } from "./errors.js"
 import { CompleteEvent, initialSnapshot } from "./model.js"
 import type {
+  AnyDeepResearchConfig,
+  AnyResearchConfig,
   DeepResearchConfig,
   DeepResearchRequest,
   ResearchConfig,
@@ -26,75 +35,93 @@ import type {
 import { reduceSnapshot } from "./protocol.js"
 
 type PublicError = RequestError | TransportError | HTTPError | ProtocolError
-type ResponseData = APISonarResponse["data"]
-type ResponseFields = ResponseData["person"] | ResponseData["company"]
-type ResponseKeyCollection = ResponseData | ResponseFields
+type AnswerKeyCollection = Readonly<Record<string, APIField>>
+type EntityKeyCollection = (
+  | APISonarResponse["data"]["person"]
+  | APISonarResponse["data"]["company"]
+) & {
+  readonly research?: AnswerKeyCollection
+  readonly deepResearch?: AnswerKeyCollection
+}
+type KeyCollection = APISonarResponse["data"] | EntityKeyCollection | AnswerKeyCollection
 
-type IsAny<Value> = 0 extends 1 & Value ? true : false
+type QuestionsOf<
+  Entity extends object,
+  Tier extends "research" | "deepResearch",
+> = Tier extends keyof Entity ? Extract<NonNullable<Entity[Tier]>, object> : Record<never, never>
 
-type TupleHasAnyElement<Keys extends readonly PropertyKey[]> = Keys extends readonly [
-  infer Head,
-  ...infer Tail extends readonly PropertyKey[],
-]
-  ? true extends IsAny<Head>
-    ? true
-    : TupleHasAnyElement<Tail>
-  : false
-
-type ValidSelectedKeys<Keys extends readonly PropertyKey[]> =
-  true extends TupleHasAnyElement<Keys> ? never : Keys
-
-type ValidQuestionMap<Questions extends object> = ValidQuestions<Questions>
-
-type ValidResearchConfig<C extends ResearchConfig<object>> = [
-  ValidQuestionMap<C["research"]>,
-] extends [never]
-  ? never
-  : C extends unknown
-    ? C & {
-        readonly person: ValidSelectedKeys<C["person"]>
-        readonly company: ValidSelectedKeys<C["company"]>
-        readonly research: ValidQuestionMap<C["research"]>
-      }
+type ValidResearchEntity<Entity extends object> =
+  QuestionsOf<Entity, "research"> extends APIValidResearchQuestions<QuestionsOf<Entity, "research">>
+    ? Entity
     : never
 
-type ValidDeepResearchConfig<C extends DeepResearchConfig<object>> = [
-  ValidQuestionMap<C["deepResearch"]>,
-] extends [never]
-  ? never
-  : C extends unknown
-    ? C & {
-        readonly person: ValidSelectedKeys<C["person"]>
-        readonly company: ValidSelectedKeys<C["company"]>
-        readonly deepResearch: ValidQuestionMap<C["deepResearch"]>
-      }
+type ValidDeepResearchEntity<Entity extends object> =
+  QuestionsOf<Entity, "deepResearch"> extends APIValidDeepResearchQuestions<
+    QuestionsOf<Entity, "deepResearch">
+  >
+    ? Entity
     : never
 
-export type ValidResearchRequest<C extends ResearchConfig<object>> = ResearchRequest<C> &
-  ValidResearchConfig<C>
-
-export type ValidDeepResearchRequest<C extends DeepResearchConfig<object>> =
-  DeepResearchRequest<C> & ValidDeepResearchConfig<C>
-
-export type ValidConfig<C extends ResearchConfig<object> | DeepResearchConfig<object>> = [
-  C,
-] extends [ResearchConfig<object>]
-  ? ValidResearchConfig<C>
-  : [C] extends [DeepResearchConfig<object>]
-    ? ValidDeepResearchConfig<C>
+export type ValidResearchConfig<C extends AnyResearchConfig> =
+  C & C["person"] extends ValidResearchEntity<C["person"]>
+    ? C["company"] extends ValidResearchEntity<C["company"]>
+      ? unknown
+      : never
     : never
+
+export type ValidDeepResearchConfig<C extends AnyDeepResearchConfig> =
+  C & C["person"] extends ValidDeepResearchEntity<C["person"]>
+    ? C["company"] extends ValidDeepResearchEntity<C["company"]>
+      ? unknown
+      : never
+    : never
+
+export type ValidResearchRequest<C extends AnyResearchConfig> = ResearchRequest<C> &
+  (C extends ValidResearchConfig<C> ? unknown : never)
+
+export type ValidDeepResearchRequest<C extends AnyDeepResearchConfig> = DeepResearchRequest<C> &
+  (C extends ValidDeepResearchConfig<C> ? unknown : never)
+
+export type ValidConfig<C extends AnyResearchConfig | AnyDeepResearchConfig> =
+  C extends AnyResearchConfig
+    ? ValidResearchConfig<C>
+    : C extends AnyDeepResearchConfig
+      ? ValidDeepResearchConfig<C>
+      : never
 
 export type SonarClientService = {
-  readonly research: <const C extends ResearchConfig<object>>(
-    request: ValidResearchRequest<C>
-  ) => Stream.Stream<SonarSnapshot<C>, PublicError>
-  readonly deepResearch: <const C extends DeepResearchConfig<object>>(
-    request: ValidDeepResearchRequest<C>
-  ) => Stream.Stream<SonarSnapshot<C>, PublicError>
-  readonly retrieve: <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
-    hash: string,
-    config: ValidConfig<C>
-  ) => Effect.Effect<SonarSnapshot<C>, PublicError>
+  readonly research: <
+    const Person extends APIResearchPersonInput<object>,
+    const Company extends APIResearchCompanyInput<object>,
+  >(
+    request: ResearchRequest<ResearchConfig<Person, Company>> &
+      (Person extends ValidResearchEntity<Person> ? unknown : never) &
+      (Company extends ValidResearchEntity<Company> ? unknown : never)
+  ) => Stream.Stream<SonarSnapshot<ResearchConfig<Person, Company>>, PublicError>
+  readonly deepResearch: <
+    const Person extends APIDeepResearchPersonInput<object>,
+    const Company extends APIDeepResearchCompanyInput<object>,
+  >(
+    request: DeepResearchRequest<DeepResearchConfig<Person, Company>> &
+      (Person extends ValidDeepResearchEntity<Person> ? unknown : never) &
+      (Company extends ValidDeepResearchEntity<Company> ? unknown : never)
+  ) => Stream.Stream<SonarSnapshot<DeepResearchConfig<Person, Company>>, PublicError>
+  readonly retrieve: {
+    <
+      const Person extends APIResearchPersonInput<object>,
+      const Company extends APIResearchCompanyInput<object>,
+    >(
+      hash: string,
+      config: ValidResearchConfig<ResearchConfig<Person, Company>>
+    ): Effect.Effect<SonarSnapshot<ResearchConfig<Person, Company>>, PublicError>
+    <
+      const Person extends APIDeepResearchPersonInput<object>,
+      const Company extends APIDeepResearchCompanyInput<object>,
+    >(
+      hash: string,
+      config: ValidDeepResearchConfig<DeepResearchConfig<Person, Company>>
+    ): Effect.Effect<SonarSnapshot<DeepResearchConfig<Person, Company>>, PublicError>
+  }
 }
 
 export class SonarClient extends Context.Service<SonarClient, SonarClientService>()(
@@ -126,7 +153,7 @@ const mapRawError = (cause: unknown, phase: "request" | "protocol" = "protocol")
     : new TransportError({ message: "Sonar transport failed" })
 }
 
-const fromAPIEvent = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+const fromAPIEvent = <const C extends AnyResearchConfig | AnyDeepResearchConfig>(
   snapshot: SonarSnapshot<C> | undefined,
   event: APISonarEvent
 ): Effect.Effect<readonly [SonarSnapshot<C>, readonly SonarSnapshot<C>[]], ProtocolError> => {
@@ -150,7 +177,7 @@ const fromAPIEvent = <const C extends ResearchConfig<object> | DeepResearchConfi
   return Effect.map(reduceSnapshot(snapshot, protocolEvent), (next) => [next, [next]])
 }
 
-const streamFromReadable = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+const streamFromReadable = <const C extends AnyResearchConfig | AnyDeepResearchConfig>(
   readable: ReadableStream<APISonarEvent>
 ) =>
   Stream.fromReadableStream({
@@ -163,25 +190,28 @@ const streamFromReadable = <const C extends ResearchConfig<object> | DeepResearc
     )
   )
 
-const researchStream = <const C extends ResearchConfig<object>>(
+const researchStream = <const C extends AnyResearchConfig>(
   api: SonarAPI,
-  request: ValidResearchRequest<C>
+  request: ResearchRequest<C>
 ): Stream.Stream<SonarSnapshot<C>, PublicError> => {
-  const parsed = APIResearchRequest.safeParse(request)
-  if (!parsed.success) {
-    return Stream.fail(mapRawError(parsed.error, "request"))
+  let body: APIResearchRequest
+  try {
+    // SAFETY: ValidResearchRequest applies the API's exported entity-map validity constraints.
+    body = compileResearchRequest(request as never)
+  } catch (error) {
+    return Stream.fail(mapRawError(error, "request"))
   }
   return Stream.unwrap(
     Effect.tryPromise({
       catch: mapRawError,
-      try: (signal) => streamResearch(api, parsed.data, { signal }),
+      try: (signal) => streamResearch(api, body, { signal }),
     }).pipe(Effect.map((readable) => streamFromReadable<C>(readable)))
   )
 }
 
-const deepResearchStream = <const C extends DeepResearchConfig<object>>(
+const deepResearchStream = <const C extends AnyDeepResearchConfig>(
   api: SonarAPI,
-  request: ValidDeepResearchRequest<C>
+  request: DeepResearchRequest<C>
 ): Stream.Stream<SonarSnapshot<C>, PublicError> => {
   const parsed = APIDeepResearchRequest.safeParse(request)
   if (!parsed.success) {
@@ -195,7 +225,7 @@ const deepResearchStream = <const C extends DeepResearchConfig<object>>(
   )
 }
 
-const sameKeys = (actual: ResponseKeyCollection, expected: readonly string[]) => {
+const sameKeys = (actual: KeyCollection, expected: readonly string[]) => {
   const keys = new Set(Object.keys(actual))
   return keys.size === expected.length && expected.every((key) => keys.has(key))
 }
@@ -205,8 +235,8 @@ const RetrieveValidationSeed = {
 } as const
 
 const parseRetrieveConfig = (
-  config: ResearchConfig<object> | DeepResearchConfig<object>
-): ResearchConfig | DeepResearchConfig | undefined => {
+  config: AnyResearchConfig | AnyDeepResearchConfig
+): AnyResearchConfig | AnyDeepResearchConfig | undefined => {
   const objectConfig = Option.getOrUndefined(decodeObject(config))
   if (!objectConfig) {
     return undefined
@@ -214,13 +244,16 @@ const parseRetrieveConfig = (
   if (Object.hasOwn(objectConfig, "seed")) {
     return undefined
   }
-  if (Object.hasOwn(objectConfig, "research")) {
-    const parsed = APIResearchRequest.safeParse({ ...objectConfig, seed: RetrieveValidationSeed })
-    if (!parsed.success) {
-      return undefined
-    }
-    const { seed: _seed, ...parsedConfig } = parsed.data
+  try {
+    // SAFETY: The public config types and ValidConfig reject malformed entity question maps; the
+    // API compiler performs the matching runtime validation.
+    const { seed: _seed, ...parsedConfig } = compileResearchRequest({
+      ...objectConfig,
+      seed: RetrieveValidationSeed,
+    } as never)
     return parsedConfig
+  } catch {
+    // A deep-research config is validated by its serializable API schema below.
   }
   const parsed = APIDeepResearchRequest.safeParse({ ...objectConfig, seed: RetrieveValidationSeed })
   if (!parsed.success) {
@@ -232,21 +265,46 @@ const parseRetrieveConfig = (
 
 const responseMatchesConfig = (
   snapshot: APISonarResponse,
-  config: ResearchConfig | DeepResearchConfig
+  config: AnyResearchConfig | AnyDeepResearchConfig
 ) => {
   const expected = initialSnapshot(config).data
   const { data } = snapshot
+  const entityMatches = (actual: EntityKeyCollection, expectedEntity: EntityKeyCollection) => {
+    if (!sameKeys(actual, Object.keys(expectedEntity))) {
+      return false
+    }
+    for (const tier of ["research", "deepResearch"] as const) {
+      const expectedAnswers = expectedEntity[tier]
+      if (
+        expectedAnswers !== undefined &&
+        !sameKeys(actual[tier] ?? {}, Object.keys(expectedAnswers))
+      ) {
+        return false
+      }
+    }
+    return true
+  }
+  // SAFETY: Parsed API data and config-derived Effect data both contain object-valued Field leaves
+  // plus optional entity-owned answer namespaces.
+  const actualPerson = data.person as EntityKeyCollection
+  // SAFETY: Parsed API data and config-derived Effect data both contain object-valued Field leaves
+  // plus optional entity-owned answer namespaces.
+  const actualCompany = data.company as EntityKeyCollection
+  // SAFETY: initialSnapshot produces the same entity collection shape from the validated config.
+  const expectedPerson = expected.person as EntityKeyCollection
+  // SAFETY: initialSnapshot produces the same entity collection shape from the validated config.
+  const expectedCompany = expected.company as EntityKeyCollection
   return (
     sameKeys(data, Object.keys(expected)) &&
-    sameKeys(data.person, Object.keys(expected.person)) &&
-    sameKeys(data.company, Object.keys(expected.company))
+    entityMatches(actualPerson, expectedPerson) &&
+    entityMatches(actualCompany, expectedCompany)
   )
 }
 
-const retrieveSnapshot = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+const retrieveSnapshot = <const C extends AnyResearchConfig | AnyDeepResearchConfig>(
   api: SonarAPI,
   hash: string,
-  config: ValidConfig<C>
+  config: C
 ): Effect.Effect<SonarSnapshot<C>, PublicError> => {
   if (hash.trim().length === 0 || hash === "." || hash === "..") {
     return Effect.fail(new RequestError({ message: "A path-safe Sonar hash is required" }))
@@ -273,17 +331,19 @@ const retrieveSnapshot = <const C extends ResearchConfig<object> | DeepResearchC
 }
 
 const makeService = (api: SonarAPI): SonarClientService => {
-  const research = <const C extends ResearchConfig<object>>(request: ValidResearchRequest<C>) =>
-    researchStream(api, request)
-  const deepResearch = <const C extends DeepResearchConfig<object>>(
-    request: ValidDeepResearchRequest<C>
-  ) => deepResearchStream(api, request)
-  const retrieve = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
-    hash: string,
-    config: ValidConfig<C>
-  ) => retrieveSnapshot(api, hash, config)
+  const research: SonarClientService["research"] = (request) => researchStream(api, request)
+  const deepResearch: SonarClientService["deepResearch"] = (request) =>
+    deepResearchStream(api, request)
+  const retrieve = (hash: string, config: AnyResearchConfig | AnyDeepResearchConfig) =>
+    retrieveSnapshot(api, hash, config)
 
-  return { deepResearch, research, retrieve }
+  return {
+    deepResearch,
+    research,
+    // SAFETY: The overloads differ only in the config-derived return type; retrieveSnapshot
+    // preserves that same config through parsing and hash removal.
+    retrieve: retrieve as SonarClientService["retrieve"],
+  }
 }
 
 export const layerFromAPI = (api: SonarAPI): Layer.Layer<SonarClient> =>

@@ -29,17 +29,23 @@ globalThis.fetch = Object.assign(
 
 const { researchSonar } = await import("../src/index.js?lazy-env-verifier")
 const config = {
-  company: ["name"] as const,
-  person: ["title"] as const,
-  research: { sellsToSMB: "Does it sell to SMBs?" },
+  company: {
+    name: true,
+    research: {
+      sellsToSMB: { description: "Does it sell to SMBs?", type: "string" },
+    },
+  },
+  person: { title: true },
   ttl: "12h",
 } as const
 const complete = {
   status: "complete",
   data: {
     person: { title: { status: "pending" } },
-    company: { name: { status: "pending" } },
-    sellsToSMB: { status: "pending" },
+    company: {
+      name: { status: "pending" },
+      research: { sellsToSMB: { status: "pending" } },
+    },
   },
 } as const
 const service = {

@@ -1,8 +1,15 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
+// oxlint-disable sort-keys -- Cross-stack fixtures assert the public person-before-company and built-in-before-custom wire order.
 
-import { createResearch, createSonar, retrieveSonar } from "@usesonar/api"
+import {
+  compileResearchRequest,
+  createDeepResearch,
+  createResearch,
+  createSonar,
+  retrieveSonar,
+} from "@usesonar/api"
 import { createBackendTestHarness } from "@usesonar/backend/testing"
-import { SonarClient, layerFromAPI, question } from "@usesonar/effect"
+import { SonarClient, layerFromAPI } from "@usesonar/effect"
 import type { SonarClientError } from "@usesonar/effect"
 import { researchSonar } from "@usesonar/eve"
 import { SonarProvider, useSonar } from "@usesonar/react"
@@ -15,15 +22,29 @@ const serverSecret = "stack-verifier-server-secret"
 const publishableKey = "pk_test_stack_tenant"
 
 const goldenSeed = {
+  domain: "analyticalengines.example",
   fullName: "Ada Lovelace",
   xURL: "https://x.com/ada",
 } as const
 
 const goldenConfig = {
-  company: ["name"],
-  person: ["title"],
-  research: {
-    sellsToSMB: question<boolean>("Does this company sell to small and medium businesses?"),
+  company: {
+    name: true,
+    research: {
+      sellsToSMB: {
+        description: "Does this company sell to small and medium businesses?",
+        type: "boolean",
+      },
+    },
+  },
+  person: {
+    research: {
+      isTechnical: {
+        description: "Does this person have a technical background?",
+        type: "boolean",
+      },
+    },
+    title: true,
   },
   ttl: "12h",
 } as const
@@ -33,15 +54,45 @@ const goldenRequest = {
   ...goldenConfig,
 } as const
 
+const goldenWireRequest = compileResearchRequest(goldenRequest)
+
+const goldenDeepRequest = {
+  company: {
+    deepResearch: { ownership: "Describe the company's ownership structure." },
+    legalName: true,
+  },
+  person: {
+    deepResearch: { biography: "Write a sourced professional biography." },
+    phone: true,
+  },
+  seed: { ...goldenSeed, email: "ada@analyticalengines.example" },
+  ttl: "12h",
+} as const
+
 type GoldenField = {
   readonly status: "pending" | "resolved" | "notFound" | "skipped"
 }
 
 type GoldenData = {
-  readonly company: { readonly name: GoldenField }
-  readonly person: { readonly title: GoldenField }
-  readonly sellsToSMB: GoldenField
-  readonly research?: never
+  readonly company: {
+    readonly name: GoldenField
+    readonly research: { readonly sellsToSMB: GoldenField }
+  }
+  readonly person: {
+    readonly research: { readonly isTechnical: GoldenField }
+    readonly title: GoldenField
+  }
+}
+
+type GoldenDeepData = {
+  readonly company: {
+    readonly deepResearch: { readonly ownership: GoldenField }
+    readonly legalName: GoldenField
+  }
+  readonly person: {
+    readonly deepResearch: { readonly biography: GoldenField }
+    readonly phone: GoldenField
+  }
 }
 
 type GoldenSnapshot = {
@@ -66,22 +117,14 @@ type RootManifest = {
   }
 }
 
-type RootTypeScriptConfig = {
-  readonly references?: readonly { readonly path?: string }[]
+type TypeScriptConfig = {
+  readonly extends?: string
+  readonly include?: readonly string[]
 }
 
-type ResearchBody = Omit<typeof goldenRequest, "ttl"> & { readonly ttl: string }
+type ResearchBody = Omit<typeof goldenWireRequest, "ttl"> & { readonly ttl: string }
 
-type RequestBody =
-  | ResearchBody
-  | {
-      readonly company: readonly string[]
-      readonly deepResearch: Readonly<Record<string, string>>
-      readonly person: readonly string[]
-      readonly seed: typeof goldenSeed
-      readonly ttl: string
-    }
-  | undefined
+type RequestBody = ResearchBody | typeof goldenDeepRequest | undefined
 
 type HashEnvelope = { readonly hash?: string }
 
@@ -121,12 +164,53 @@ const resolvedCustom = {
   value: true,
 } as const
 
-const expectedKeys = ["person", "company", "sellsToSMB"]
+const resolvedPersonCustom = {
+  confidence: 0.86,
+  resolvedAt: "2026-08-26T12:00:03.000Z",
+  sources: ["https://example.test/ada/technical-work"],
+  status: "resolved",
+  value: true,
+} as const
+
+const resolvedPhone = {
+  confidence: 0.71,
+  resolvedAt: "2026-08-26T12:00:04.000Z",
+  sources: ["https://example.test/ada/contact"],
+  status: "resolved",
+  value: "+1-555-0100",
+} as const
+
+const resolvedLegalName = {
+  confidence: 0.94,
+  resolvedAt: "2026-08-26T12:00:05.000Z",
+  sources: ["https://example.test/company-registry"],
+  status: "resolved",
+  value: "Analytical Engines, Inc.",
+} as const
+
+const resolvedBiography = {
+  confidence: 0.79,
+  resolvedAt: "2026-08-26T12:00:06.000Z",
+  sources: ["https://example.test/ada/biography"],
+  status: "resolved",
+  value: "Ada Lovelace developed foundational work in computing.",
+} as const
+
+const resolvedOwnership = {
+  confidence: 0.76,
+  resolvedAt: "2026-08-26T12:00:07.000Z",
+  sources: ["https://example.test/company-registry/ownership"],
+  status: "resolved",
+  value: "Privately held.",
+} as const
+
+const expectedKeys = ["person", "company"]
 
 const forbiddenMetadata = ["hash", "provider", "cache", "runId", "workflow", "jobId", "secret"]
 
+const privateProviderDetails = ["core-fast", "firecrawl", "medium", "parallel", "sixtyfour"]
+
 const poisonedEnvironmentKeys = [
-  "EXA_API_KEY",
   "FIRECRAWL_API_KEY",
   "OPENAI_API_KEY",
   "PARALLEL_API_KEY",
@@ -182,17 +266,40 @@ const expectGoldenData = (data: GoldenData | undefined) => {
   }
   expect(Object.keys(data)).toEqual(expectedKeys)
   expect(data).toMatchObject({
-    company: { name: { status: "resolved" } },
-    person: { title: { status: "resolved" } },
-    sellsToSMB: { status: "resolved" },
+    company: {
+      name: { status: "resolved" },
+      research: { sellsToSMB: { status: "resolved" } },
+    },
+    person: {
+      research: { isTechnical: { status: "resolved" } },
+      title: { status: "resolved" },
+    },
   })
-  expect(data.research).toBeUndefined()
 }
 
-const expectNoMetadata = (value: GoldenData | GoldenSnapshot | undefined | null) => {
+const expectGoldenDeepData = (data: GoldenDeepData | undefined) => {
+  expect(data).toEqual({
+    person: {
+      phone: resolvedPhone,
+      deepResearch: { biography: resolvedBiography },
+    },
+    company: {
+      legalName: resolvedLegalName,
+      deepResearch: { ownership: resolvedOwnership },
+    },
+  })
+}
+
+const expectNoMetadata = (
+  value: GoldenData | GoldenDeepData | GoldenSnapshot | undefined | null
+) => {
   const serialized = JSON.stringify(value)
   for (const forbidden of forbiddenMetadata) {
     expect(serialized).not.toContain(`"${forbidden}"`)
+  }
+  const normalized = serialized.toLowerCase()
+  for (const detail of privateProviderDetails) {
+    expect(normalized).not.toContain(detail.toLowerCase())
   }
 }
 
@@ -279,10 +386,11 @@ describe("STK-001 through STK-003 golden backend, API, and Effect path", () => {
     expect(pending.status).toBe("pending")
     expect(Object.keys(pending.data)).toEqual(expectedKeys)
     expect(pending.data.person.title).toEqual({ status: "pending" })
+    expect(pending.data.person.research.isTechnical).toEqual({ status: "pending" })
     expect(pending.data.company.name).toEqual({ status: "pending" })
-    expect(pending.data.sellsToSMB).toEqual({ status: "pending" })
+    expect(pending.data.company.research.sellsToSMB).toEqual({ status: "pending" })
     expectNoMetadata(pending.data)
-    expect(await calls[0]?.json()).toEqual(goldenRequest)
+    expect(await calls[0]?.json()).toEqual(goldenWireRequest)
 
     const effectSnapshotsPromise = Effect.runPromise(
       SonarClient.use((service) => Stream.runCollect(service.research(goldenRequest))).pipe(
@@ -292,8 +400,9 @@ describe("STK-001 through STK-003 golden backend, API, and Effect path", () => {
 
     await harness.settleIdentify({ status: "resolved" })
     await harness.settle("person.title", resolvedTitle)
+    await harness.settle("person.research.isTechnical", resolvedPersonCustom)
     await harness.settle("company.name", resolvedCompanyName)
-    await harness.settle("sellsToSMB", resolvedCustom)
+    await harness.settle("company.research.sellsToSMB", resolvedCustom)
 
     const effectSnapshots = [...(await effectSnapshotsPromise)]
     const [firstEffectSnapshot] = effectSnapshots
@@ -301,9 +410,14 @@ describe("STK-001 through STK-003 golden backend, API, and Effect path", () => {
 
     expect(firstEffectSnapshot?.status).toBe("pending")
     expect(firstEffectSnapshot?.data).toEqual({
-      company: { name: { status: "pending" } },
-      person: { title: { status: "pending" } },
-      sellsToSMB: { status: "pending" },
+      person: {
+        title: { status: "pending" },
+        research: { isTechnical: { status: "pending" } },
+      },
+      company: {
+        name: { status: "pending" },
+        research: { sellsToSMB: { status: "pending" } },
+      },
     })
     expect(finalEffectSnapshot?.status).toBe("complete")
     expectGoldenData(finalEffectSnapshot?.data)
@@ -319,8 +433,57 @@ describe("STK-001 through STK-003 golden backend, API, and Effect path", () => {
     expect(retrieved.status).toBe("complete")
     expect(retrieved.data).toEqual(finalEffectSnapshot?.data)
     expect(calls).toHaveLength(3)
-    expect(await calls[1]?.json()).toEqual(goldenRequest)
+    expect(await calls[1]?.json()).toEqual(goldenWireRequest)
     expect(calls[2]?.method).toBe("GET")
+    expect(harness.inspect().runsStarted).toBe(1)
+  })
+
+  test("preserves entity-owned deep-research questions and results", async () => {
+    const harness = await boot()
+    const calls: Request[] = []
+    const client = stackClient(async (outgoing) => {
+      calls.push(outgoing.clone())
+      return await harness.fetch(outgoing)
+    })
+
+    const pending = await createDeepResearch(client, goldenDeepRequest)
+    expect(pending.status).toBe("pending")
+    expect(pending.data).toEqual({
+      person: {
+        phone: { status: "pending" },
+        deepResearch: { biography: { status: "pending" } },
+      },
+      company: {
+        legalName: { status: "pending" },
+        deepResearch: { ownership: { status: "pending" } },
+      },
+    })
+    expectNoMetadata(pending.data)
+    expect(await calls[0]?.json()).toEqual(goldenDeepRequest)
+
+    const snapshotsPromise = Effect.runPromise(
+      SonarClient.use((service) => Stream.runCollect(service.deepResearch(goldenDeepRequest))).pipe(
+        Effect.provide(layerFromAPI(client))
+      )
+    )
+
+    await harness.settleIdentify({ status: "resolved" })
+    await harness.settle("person.phone", resolvedPhone)
+    await harness.settle("person.deepResearch.biography", resolvedBiography)
+    await harness.settle("company.legalName", resolvedLegalName)
+    await harness.settle("company.deepResearch.ownership", resolvedOwnership)
+
+    const snapshots = [...(await snapshotsPromise)]
+    const completed = snapshots.at(-1)
+    expect(completed?.status).toBe("complete")
+    expectGoldenDeepData(completed?.data)
+    expectNoMetadata(completed?.data)
+    if (!completed) {
+      throw new Error("Expected a completed deep-research snapshot")
+    }
+    expect("hash" in completed).toBe(false)
+    expect(calls).toHaveLength(2)
+    expect(await calls[1]?.json()).toEqual(goldenDeepRequest)
     expect(harness.inspect().runsStarted).toBe(1)
   })
 
@@ -334,12 +497,12 @@ describe("STK-001 through STK-003 golden backend, API, and Effect path", () => {
 
     const jsonResponse = await client.post("/v1/research", {
       headers: { accept: "application/json" },
-      json: goldenRequest,
+      json: goldenWireRequest,
     })
     expect(jsonResponse.status).toBe(200)
     const stream = await client.post("/v1/research", {
       headers: { accept: "text/event-stream" },
-      json: goldenRequest,
+      json: goldenWireRequest,
     })
     expect(stream.status).toBe(200)
 
@@ -363,35 +526,45 @@ describe("STK-001 through STK-003 golden backend, API, and Effect path", () => {
 
     const resumed = await client.post("/v1/research", {
       headers: { accept: "text/event-stream", "last-event-id": firstField.id },
-      json: goldenRequest,
+      json: goldenWireRequest,
     })
     expect(resumed.status).toBe(200)
+    const personCustomPromise = harness.nextSSE(resumed)
+    await harness.settle("person.research.isTechnical", resolvedPersonCustom)
+    const personCustom = await personCustomPromise
+    expect(personCustom).toMatchObject({
+      data: { path: "person.research.isTechnical", status: "resolved" },
+      event: "field",
+      id: "2",
+    })
+
     const resumedFieldPromise = harness.nextSSE(resumed)
     await harness.settle("company.name", resolvedCompanyName)
     const resumedField = await resumedFieldPromise
     expect(resumedField).toMatchObject({
       data: { path: "company.name", status: "resolved" },
       event: "field",
-      id: "2",
+      id: "3",
     })
 
     const customFieldPromise = harness.nextSSE(resumed)
-    await harness.settle("sellsToSMB", resolvedCustom)
+    await harness.settle("company.research.sellsToSMB", resolvedCustom)
     const customField = await customFieldPromise
     expect(customField).toMatchObject({
-      data: { path: "sellsToSMB", status: "resolved" },
+      data: { path: "company.research.sellsToSMB", status: "resolved" },
       event: "field",
-      id: "3",
+      id: "4",
     })
     const complete = await harness.nextSSE(resumed)
-    expect(complete).toMatchObject({ event: "complete", id: "4" })
+    expect(complete).toMatchObject({ event: "complete", id: "5" })
 
-    const fieldEvents = [firstField, resumedField, customField]
-    expect(fieldEvents.map((event) => event.id)).toEqual(["1", "2", "3"])
+    const fieldEvents = [firstField, personCustom, resumedField, customField]
+    expect(fieldEvents.map((event) => event.id)).toEqual(["1", "2", "3", "4"])
     expect(fieldEvents.map((event) => event.data.path)).toEqual([
       "person.title",
+      "person.research.isTechnical",
       "company.name",
-      "sellsToSMB",
+      "company.research.sellsToSMB",
     ])
     expect(new Set(fieldEvents.map((event) => event.id)).size).toBe(fieldEvents.length)
     expect(calls[2]?.headers.get("last-event-id")).toBe("1")
@@ -430,15 +603,21 @@ describe("STK-004 React adapter", () => {
       })
       expect(result.status).toBe("pending")
       expect(result.data).toMatchObject({
-        company: { name: { status: "pending" } },
-        person: { title: { status: "pending" } },
-        sellsToSMB: { status: "pending" },
+        company: {
+          name: { status: "pending" },
+          research: { sellsToSMB: { status: "pending" } },
+        },
+        person: {
+          research: { isTechnical: { status: "pending" } },
+          title: { status: "pending" },
+        },
       })
 
       await harness.settleIdentify({ status: "resolved" })
       await harness.settle("person.title", resolvedTitle)
+      await harness.settle("person.research.isTechnical", resolvedPersonCustom)
       await harness.settle("company.name", resolvedCompanyName)
-      await harness.settle("sellsToSMB", resolvedCustom)
+      await harness.settle("company.research.sellsToSMB", resolvedCustom)
 
       await act(async () => {
         await drainMicrotasks()
@@ -477,15 +656,21 @@ describe("STK-005 Eve adapter", () => {
     await drainMicrotasks()
     await harness.settleIdentify({ status: "resolved" })
     await harness.settle("person.title", resolvedTitle)
+    await harness.settle("person.research.isTechnical", resolvedPersonCustom)
     await harness.settle("company.name", resolvedCompanyName)
-    await harness.settle("sellsToSMB", resolvedCustom)
+    await harness.settle("company.research.sellsToSMB", resolvedCustom)
     const snapshots = await snapshotsPromise
 
     expect(snapshots[0]).toMatchObject({
       data: {
-        company: { name: { status: "pending" } },
-        person: { title: { status: "pending" } },
-        sellsToSMB: { status: "pending" },
+        company: {
+          name: { status: "pending" },
+          research: { sellsToSMB: { status: "pending" } },
+        },
+        person: {
+          research: { isTechnical: { status: "pending" } },
+          title: { status: "pending" },
+        },
       },
       status: "pending",
     })
@@ -501,9 +686,22 @@ describe("STK-005 Eve adapter", () => {
       value: {
         company: {
           name: { confidence: resolvedCompanyName.confidence, value: resolvedCompanyName.value },
+          research: {
+            sellsToSMB: {
+              confidence: resolvedCustom.confidence,
+              value: resolvedCustom.value,
+            },
+          },
         },
-        person: { title: { confidence: resolvedTitle.confidence, value: resolvedTitle.value } },
-        sellsToSMB: { confidence: resolvedCustom.confidence, value: resolvedCustom.value },
+        person: {
+          research: {
+            isTechnical: {
+              confidence: resolvedPersonCustom.confidence,
+              value: resolvedPersonCustom.value,
+            },
+          },
+          title: { confidence: resolvedTitle.confidence, value: resolvedTitle.value },
+        },
       },
     })
     const serialized = JSON.stringify(projected)
@@ -533,7 +731,7 @@ describe("STK-006 tenant and identity boundaries", () => {
       ],
     })
     const first = await harness.fetch(
-      request("/v1/research", goldenRequest, {
+      request("/v1/research", goldenWireRequest, {
         key: publishableKey,
         origin: "https://stack.test",
       })
@@ -542,7 +740,7 @@ describe("STK-006 tenant and identity boundaries", () => {
     expect(firstBody.hash).toBeString()
 
     const foreignPost = await harness.fetch(
-      request("/v1/research", goldenRequest, {
+      request("/v1/research", goldenWireRequest, {
         key: "pk_test_foreign_tenant",
         origin: "https://foreign.test",
       })
@@ -553,21 +751,14 @@ describe("STK-006 tenant and identity boundaries", () => {
     const differentTTL = await harness.fetch(
       request(
         "/v1/research",
-        { ...goldenRequest, ttl: "24h" },
+        { ...goldenWireRequest, ttl: "24h" },
         { key: publishableKey, origin: "https://stack.test" }
       )
     )
     expect(await jsonHash(differentTTL)).not.toBe(firstBody.hash)
 
-    const deepRequest = {
-      company: ["legalName"],
-      deepResearch: { sellsToSMB: goldenConfig.research.sellsToSMB },
-      person: ["phone"],
-      seed: goldenSeed,
-      ttl: "12h",
-    }
     const differentRoute = await harness.fetch(
-      request("/v1/deepResearch", deepRequest, {
+      request("/v1/deepResearch", goldenDeepRequest, {
         key: publishableKey,
         origin: "https://stack.test",
       })
@@ -593,8 +784,12 @@ describe("STK-006 tenant and identity boundaries", () => {
       request(
         "/v1/research",
         {
-          ...goldenRequest,
-          seed: { fullName: " ADA LOVELACE ", xURL: goldenSeed.xURL },
+          ...goldenWireRequest,
+          seed: {
+            domain: goldenSeed.domain,
+            fullName: " ADA LOVELACE ",
+            xURL: goldenSeed.xURL,
+          },
         },
         { key: publishableKey, origin: "https://stack.test" }
       )
@@ -606,10 +801,19 @@ describe("STK-006 tenant and identity boundaries", () => {
       request(
         "/v1/research",
         {
-          company: [...goldenConfig.company],
-          person: [...goldenConfig.person],
-          research: { ...goldenConfig.research },
-          seed: { fullName: goldenSeed.fullName, xURL: goldenSeed.xURL },
+          company: {
+            name: true,
+            research: { ...goldenWireRequest.company.research },
+          },
+          person: {
+            research: { ...goldenWireRequest.person.research },
+            title: true,
+          },
+          seed: {
+            domain: goldenSeed.domain,
+            fullName: goldenSeed.fullName,
+            xURL: goldenSeed.xURL,
+          },
           ttl: goldenConfig.ttl,
         },
         { key: publishableKey, origin: "https://stack.test" }
@@ -627,19 +831,17 @@ describe("STK-007 through STK-009 static workspace boundaries", () => {
       await Bun.file(new URL("../package.json", import.meta.url)).text()
     )
     expect(rootPackage.workspaces).toEqual(["apps/*", "packages/*"])
-    const rootTypeScript = parseManifest<RootTypeScriptConfig>(
-      await Bun.file(new URL("../tsconfig.json", import.meta.url)).text()
+    const buildTypeScript = parseManifest<TypeScriptConfig>(
+      await Bun.file(new URL("../tsconfig.build.json", import.meta.url)).text()
     )
-    const references = rootTypeScript.references?.map(({ path }) => path) ?? []
-    expect(references).toEqual(
-      expect.arrayContaining([
-        "./packages/api",
-        "./packages/effect",
-        "./packages/eve",
-        "./packages/react",
-        "./packages/backend",
-      ])
-    )
+    expect(buildTypeScript.extends).toBe("./tsconfig.json")
+    expect(buildTypeScript.include).toEqual([
+      "packages/api/src/**/*.ts",
+      "packages/effect/src/**/*.ts",
+      "packages/react/src/**/*.ts",
+      "packages/react/src/**/*.tsx",
+      "packages/eve/src/**/*.ts",
+    ])
     for (const scriptName of ["build", "check:packages"]) {
       const script = rootPackage.scripts?.[scriptName] ?? ""
       for (const packageName of [

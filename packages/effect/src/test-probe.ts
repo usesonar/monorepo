@@ -2,15 +2,15 @@ import { Context } from "effect"
 import type { Effect } from "effect"
 
 import type {
-  DeepResearchConfig,
+  AnyDeepResearchConfig,
+  AnyResearchConfig,
   DeepResearchRequest,
-  ResearchConfig,
   ResearchRequest,
 } from "./model.js"
 
 type ScenarioRequest =
-  | ResearchRequest<ResearchConfig<object>>
-  | DeepResearchRequest<DeepResearchConfig<object>>
+  | ResearchRequest<AnyResearchConfig>
+  | DeepResearchRequest<AnyDeepResearchConfig>
 
 export type SonarTestProbeService = {
   readonly requests: Effect.Effect<readonly ScenarioRequest[]>

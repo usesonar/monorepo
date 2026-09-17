@@ -1,7 +1,19 @@
 /* eslint-disable anti-slop/no-conditional-empty-object-spread, anti-slop/no-known-value-widening, anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- Eve inputs, Effect failures, and streamed snapshots are untrusted runtime boundaries that this module validates or projects before use; projection intentionally builds a runtime-selected field map. */
-import { SonarClient, layer as sonarLayer } from "@usesonar/effect"
-import type { DeepResearchConfig, ResearchConfig, SonarSeed, SonarSnapshot } from "@usesonar/effect"
-import { Effect, Stream } from "effect"
+import {
+  DeepResearchRequest,
+  SonarClient,
+  compileResearchRequest,
+  layer as sonarLayer,
+} from "@usesonar/effect"
+import type {
+  DeepResearchConfig,
+  DeepResearchRequest as EffectDeepResearchRequest,
+  ResearchConfig,
+  ResearchRequest as EffectResearchRequest,
+  SonarSeed,
+  SonarSnapshot,
+} from "@usesonar/effect"
+import { Effect, Schema, Stream } from "effect"
 import type { Layer } from "effect"
 
 import { isDynamicConfig } from "./config.js"
@@ -70,23 +82,21 @@ const seedFromInput = (input: Readonly<Record<string, unknown>>): SonarSeed => {
 export const researchRequest = (
   config: ResearchFactoryConfig,
   input: Readonly<Record<string, unknown>>
-): ResearchConfig & { readonly seed: SonarSeed } => {
+): EffectResearchRequest => {
   const seed = seedFromInput(input)
   if (isDynamicConfig(config)) {
-    // SAFETY: The dynamic research Effect Schema validated these three tier-specific fields.
+    // SAFETY: The dynamic research Effect Schema validated these two entity maps.
     const dynamicInput = input as Readonly<Record<string, unknown>> & {
       readonly person: ResearchConfig["person"]
       readonly company: ResearchConfig["company"]
-      readonly research: ResearchConfig["research"]
     }
-    // oxlint-disable-next-line sort-keys -- Public Effect requests place the seed before Sonar config fields and preserve person before company.
-    return {
+    // SAFETY: The dynamic research input schema accepts canonical raw JSON Schema maps only.
+    return compileResearchRequest({
+      company: dynamicInput.company,
+      person: dynamicInput.person,
       seed,
       ttl: config.ttl,
-      person: dynamicInput.person,
-      company: dynamicInput.company,
-      research: dynamicInput.research,
-    }
+    } as never)
   }
   // oxlint-disable-next-line sort-keys -- Public Effect requests place the seed before Sonar config fields and preserve person before company.
   return {
@@ -94,31 +104,26 @@ export const researchRequest = (
     ttl: config.ttl,
     person: config.person,
     company: config.company,
-    // SAFETY: Factory validation proved every static question value is a non-empty string.
-    research: config.research as ResearchConfig["research"],
   }
 }
 
 export const deepResearchRequest = (
   config: DeepResearchFactoryConfig,
   input: Readonly<Record<string, unknown>>
-): DeepResearchConfig & { readonly seed: SonarSeed } => {
+): EffectDeepResearchRequest => {
   const seed = seedFromInput(input)
   if (isDynamicConfig(config)) {
-    // SAFETY: The dynamic deep research Effect Schema validated these three tier-specific fields.
+    // SAFETY: The dynamic deep research Effect Schema validated these two entity maps.
     const dynamicInput = input as Readonly<Record<string, unknown>> & {
       readonly person: DeepResearchConfig["person"]
       readonly company: DeepResearchConfig["company"]
-      readonly deepResearch: DeepResearchConfig["deepResearch"]
     }
-    // oxlint-disable-next-line sort-keys -- Public Effect requests place the seed before Sonar config fields and preserve person before company.
-    return {
+    return Schema.decodeUnknownSync(DeepResearchRequest)({
+      company: dynamicInput.company,
+      person: dynamicInput.person,
       seed,
       ttl: config.ttl,
-      person: dynamicInput.person,
-      company: dynamicInput.company,
-      deepResearch: dynamicInput.deepResearch,
-    }
+    })
   }
   // oxlint-disable-next-line sort-keys -- Public Effect requests place the seed before Sonar config fields and preserve person before company.
   return {
@@ -126,14 +131,12 @@ export const deepResearchRequest = (
     ttl: config.ttl,
     person: config.person,
     company: config.company,
-    // SAFETY: Factory validation proved every static question value is a non-empty string.
-    deepResearch: config.deepResearch as DeepResearchConfig["deepResearch"],
   }
 }
 
 const clientStream = <Config extends ResearchConfig | DeepResearchConfig>(
   route: SonarToolRoute,
-  request: Config & { readonly seed: SonarSeed },
+  request: EffectResearchRequest | EffectDeepResearchRequest,
   injected: Layer.Layer<SonarClient> | undefined
 ) => {
   const operation = SonarClient.pipe(
@@ -204,11 +207,11 @@ export const streamSnapshots = async function* streamSnapshots<
   Config extends ResearchConfig | DeepResearchConfig,
 >(
   route: SonarToolRoute,
-  request: Config & { readonly seed: SonarSeed },
+  request: EffectResearchRequest | EffectDeepResearchRequest,
   layer: Layer.Layer<SonarClient> | undefined,
   signal: AbortSignal
 ) {
-  const iterator = Stream.toAsyncIterable(clientStream(route, request, layer))[
+  const iterator = Stream.toAsyncIterable(clientStream<Config>(route, request, layer))[
     Symbol.asyncIterator
   ]()
   try {
@@ -229,12 +232,12 @@ export const streamSnapshots = async function* streamSnapshots<
 
 export const finalSnapshot = async <Config extends ResearchConfig | DeepResearchConfig>(
   route: "research" | "deepResearch",
-  request: Config & { readonly seed: SonarSeed },
+  request: EffectResearchRequest | EffectDeepResearchRequest,
   layer: Layer.Layer<SonarClient> | undefined,
   signal: AbortSignal
 ) => {
   let final: SonarSnapshot<Config> | undefined
-  for await (const snapshot of streamSnapshots(route, request, layer, signal)) {
+  for await (const snapshot of streamSnapshots<Config>(route, request, layer, signal)) {
     final = snapshot
   }
   if (final === undefined) {
@@ -304,17 +307,52 @@ const isProjectableCustomKey = (
   allowed: ReadonlySet<string> | undefined
 ): key is string =>
   typeof key === "string" &&
-  key !== "person" &&
-  key !== "company" &&
   customKeyPattern.test(key) &&
   !reservedCustomKeys.has(key) &&
   (allowed === undefined || allowed.has(key))
+
+const projectAnswers = (input: unknown, allowed: readonly string[] | undefined) => {
+  if (typeof input !== "object" || input === null) {
+    return {}
+  }
+  const projected: ProjectedFields = {}
+  const allowedKeys = allowed === undefined ? undefined : new Set(allowed)
+  for (const key of Reflect.ownKeys(input)) {
+    if (!isProjectableCustomKey(key, allowedKeys)) {
+      continue
+    }
+    const leaf = resolvedLeaf(ownDataProperty(input, key)?.value)
+    if (leaf !== undefined) {
+      projected[key] = leaf
+    }
+  }
+  return projected
+}
+
+const projectEntity = (
+  input: unknown,
+  fields: readonly string[],
+  namespace: "research" | "deepResearch",
+  answers: readonly string[] | undefined
+) => {
+  const projected: Record<string, unknown> = projectFields(input, new Set(fields))
+  if (typeof input !== "object" || input === null) {
+    return projected
+  }
+  const nestedAnswers = projectAnswers(ownDataProperty(input, namespace)?.value, answers)
+  if (Object.keys(nestedAnswers).length > 0) {
+    projected[namespace] = nestedAnswers
+  }
+  return projected
+}
 
 export const projectSnapshot = (
   snapshot: unknown,
   personFields: readonly string[],
   companyFields: readonly string[],
-  customFields: readonly string[] | undefined
+  namespace: "research" | "deepResearch",
+  personAnswers: readonly string[] | undefined,
+  companyAnswers: readonly string[] | undefined
 ) => {
   if (typeof snapshot !== "object" || snapshot === null) {
     return { type: "json" as const, value: {} }
@@ -325,23 +363,23 @@ export const projectSnapshot = (
   }
   const data = dataProperty.value
   const value: Record<string, unknown> = {}
-  const person = projectFields(ownDataProperty(data, "person")?.value, new Set(personFields))
+  const person = projectEntity(
+    ownDataProperty(data, "person")?.value,
+    personFields,
+    namespace,
+    personAnswers
+  )
   if (Object.keys(person).length > 0) {
     value.person = person
   }
-  const company = projectFields(ownDataProperty(data, "company")?.value, new Set(companyFields))
+  const company = projectEntity(
+    ownDataProperty(data, "company")?.value,
+    companyFields,
+    namespace,
+    companyAnswers
+  )
   if (Object.keys(company).length > 0) {
     value.company = company
-  }
-  const allowedCustom = customFields === undefined ? undefined : new Set(customFields)
-  for (const key of Reflect.ownKeys(data)) {
-    if (isProjectableCustomKey(key, allowedCustom)) {
-      const field = ownDataProperty(data, key)
-      const leaf = resolvedLeaf(field?.value)
-      if (leaf !== undefined) {
-        value[key] = leaf
-      }
-    }
   }
   return { type: "json" as const, value }
 }

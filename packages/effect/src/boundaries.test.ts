@@ -56,10 +56,10 @@ test("the root and testing subpath expose only the locked runtime exports", asyn
     "TTL",
     "TransportError",
     "canonicalRequestIdentity",
+    "compileResearchRequest",
     "initialSnapshot",
     "layer",
     "layerFromAPI",
-    "question",
     "reduceSnapshot",
   ])
   expect(Object.keys(testing).toSorted()).toEqual(["Scenario", "SonarTestProbe", "scenarioLayer"])

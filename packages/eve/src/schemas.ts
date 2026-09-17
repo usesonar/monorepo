@@ -69,35 +69,59 @@ const validSeed = Schema.makeFilter<Readonly<Record<string, unknown>>>((input) =
     : "Provide a valid linkedinURL, fullName with xURL, or fullName with email"
 )
 
-const validQuestions = Schema.makeFilter<Readonly<Record<string, string>>>((questions) => {
+const validQuestionKeys = (questions: Readonly<Record<string, unknown>>) => {
   const invalid = Object.keys(questions).find(
     (key) => !customKeyPattern.test(key) || reservedKeys.has(key)
   )
   return invalid === undefined ? undefined : `Invalid custom answer key: ${invalid}`
-})
+}
 
-const Questions = Schema.Record(Schema.String, nonEmpty).check(validQuestions)
+const DeepResearchQuestions = Schema.Record(Schema.String, nonEmpty).check(
+  Schema.makeFilter(validQuestionKeys)
+)
 
-const fields = <Values extends readonly string[]>(values: Values) =>
-  Schema.Array(Schema.Literals(values)).check(
-    Schema.makeFilter((selected) =>
-      new Set(selected).size === selected.length ? undefined : "Selected fields must be unique"
+const ResearchQuestions = Schema.Record(Schema.String, Schema.Json).check(
+  Schema.makeFilter((questions) => {
+    const invalidKey = validQuestionKeys(questions)
+    if (invalidKey !== undefined) {
+      return invalidKey
+    }
+    const invalidSchema = Object.entries(questions).find(
+      ([, schema]) =>
+        !isPlainObject(schema) ||
+        typeof schema.description !== "string" ||
+        schema.description.trim().length === 0
     )
-  )
-
-const selectedSomething = (questionKey: "research" | "deepResearch") =>
-  Schema.makeFilter<{
-    readonly person: readonly string[]
-    readonly company: readonly string[]
-    readonly [key: string]: unknown
-  }>((input) => {
-    const questions = input[questionKey]
-    return input.person.length +
-      input.company.length +
-      (isPlainObject(questions) ? Object.keys(questions).length : 0) >
-      0
+    return invalidSchema === undefined
       ? undefined
-      : "Select at least one built-in or custom field"
+      : `Research question ${invalidSchema[0]} requires JSON Schema with a description`
+  })
+)
+
+const entityInput = (
+  fields: readonly string[],
+  namespace: "research" | "deepResearch",
+  questions: Schema.Constraint
+) =>
+  Schema.Struct({
+    ...Object.fromEntries(fields.map((field) => [field, Schema.optionalKey(Schema.Literal(true))])),
+    [namespace]: Schema.optionalKey(questions),
+  })
+
+const selectedSomething = (namespace: "research" | "deepResearch") =>
+  Schema.makeFilter<{ readonly person: object; readonly company: object }>((input) => {
+    const count = [input.person, input.company].reduce(
+      (total, entity) =>
+        total +
+        Object.entries(entity).reduce(
+          (entityTotal, [key, value]) =>
+            entityTotal +
+            (key === namespace && isPlainObject(value) ? Object.keys(value).length : 1),
+          0
+        ),
+      0
+    )
+    return count > 0 ? undefined : "Select at least one built-in or custom field"
   })
 
 const Seed = Schema.Struct(SeedFields).check(validSeed)
@@ -108,9 +132,8 @@ export const researchInputSchema = (dynamic: boolean) =>
         // oxlint-disable-next-line sort-keys -- Sonar's public contract lists person before company.
         Schema.Struct({
           ...SeedFields,
-          person: fields(researchPersonFields),
-          company: fields(researchCompanyFields),
-          research: Questions,
+          person: entityInput(researchPersonFields, "research", ResearchQuestions),
+          company: entityInput(researchCompanyFields, "research", ResearchQuestions),
         }).check(validSeed, selectedSomething("research"))
       )
     : standard(Seed)
@@ -121,9 +144,8 @@ export const deepResearchInputSchema = (dynamic: boolean) =>
         // oxlint-disable-next-line sort-keys -- Sonar's public contract lists person before company.
         Schema.Struct({
           ...SeedFields,
-          person: fields(deepResearchPersonFields),
-          company: fields(deepResearchCompanyFields),
-          deepResearch: Questions,
+          person: entityInput(deepResearchPersonFields, "deepResearch", DeepResearchQuestions),
+          company: entityInput(deepResearchCompanyFields, "deepResearch", DeepResearchQuestions),
         }).check(validSeed, selectedSomething("deepResearch"))
       )
     : standard(Seed)
@@ -174,14 +196,15 @@ const deepResearchPersonValues = { phone: Schema.String } as const
 const deepResearchCompanyValues = { legalName: Schema.String } as const
 
 const selectedFields = (
-  selected: readonly string[],
+  selected: Readonly<Record<string, unknown>>,
   catalog: Readonly<Record<string, Schema.Constraint>>
 ) =>
-  // SAFETY: Every selected key was validated against the tier catalog before schema creation.
-  Object.fromEntries(selected.map((key) => [key, field(catalog[key])])) as Record<
-    string,
-    ReturnType<typeof field>
-  >
+  // SAFETY: Factory validation accepts true only for built-ins in this exact tier catalog.
+  Object.fromEntries(
+    Object.entries(catalog)
+      .filter(([key]) => selected[key] === true)
+      .map(([key, value]) => [key, field(value)])
+  ) as Record<string, ReturnType<typeof field>>
 
 const optionalCatalogFields = (catalog: Readonly<Record<string, Schema.Constraint>>) =>
   // SAFETY: Object.fromEntries preserves one schema property for every catalog entry.
@@ -190,71 +213,81 @@ const optionalCatalogFields = (catalog: Readonly<Record<string, Schema.Constrain
   ) as Record<string, ReturnType<typeof Schema.optionalKey>>
 
 const outputSchema = (
-  person: readonly string[],
-  company: readonly string[],
-  questions: readonly string[],
+  person: Readonly<Record<string, unknown>>,
+  company: Readonly<Record<string, unknown>>,
+  namespace: "research" | "deepResearch",
+  answerValue: Schema.Constraint,
   personCatalog: Readonly<Record<string, Schema.Constraint>>,
   companyCatalog: Readonly<Record<string, Schema.Constraint>>
 ) => {
+  const entity = (
+    config: Readonly<Record<string, unknown>>,
+    catalog: Readonly<Record<string, Schema.Constraint>>
+  ) => {
+    const questions = config[namespace]
+    const questionKeys = isPlainObject(questions) ? Object.keys(questions) : []
+    const fields: Record<string, Schema.Top> = selectedFields(config, catalog)
+    if (questionKeys.length > 0) {
+      fields[namespace] = Schema.Struct(
+        Object.fromEntries(questionKeys.map((key) => [key, field(answerValue)]))
+      )
+    }
+    return Schema.Struct(fields)
+  }
   // oxlint-disable-next-line sort-keys -- Sonar snapshots always nest person before company.
   const data = Schema.Struct({
-    person: Schema.Struct(selectedFields(person, personCatalog)),
-    company: Schema.Struct(selectedFields(company, companyCatalog)),
-    ...Object.fromEntries(questions.map((key) => [key, field()])),
+    person: entity(person, personCatalog),
+    company: entity(company, companyCatalog),
   })
   // oxlint-disable-next-line sort-keys -- Snapshot JSON Schema follows the public status-then-data contract.
   return standard(Schema.Struct({ status: Schema.Literals(["pending", "complete"]), data }))
 }
 
 const dynamicOutputSchema = (
+  namespace: "research" | "deepResearch",
+  answerValue: Schema.Constraint,
   personCatalog: Readonly<Record<string, Schema.Constraint>>,
   companyCatalog: Readonly<Record<string, Schema.Constraint>>
 ) => {
-  const person = Schema.Struct(optionalCatalogFields(personCatalog))
-  const company = Schema.Struct(optionalCatalogFields(companyCatalog))
-  const answer = field()
-  const data = Schema.StructWithRest(
-    // oxlint-disable-next-line sort-keys -- Sonar snapshots always nest person before company.
-    Schema.Struct({ person, company }),
-    [Schema.Record(Schema.String, Schema.Union([answer, person, company]))]
-  ).check(
-    Schema.makeFilter<unknown>((input) => {
-      if (!isPlainObject(input)) {
-        return
-      }
-      const invalid = Object.keys(input).find((key) => {
-        if (key === "person" || key === "company") {
-          return false
-        }
-        return (
-          !customKeyPattern.test(key) || reservedKeys.has(key) || !Schema.is(answer)(input[key])
-        )
-      })
-      return invalid === undefined ? undefined : `Invalid custom answer key: ${invalid}`
-    })
+  const answers = Schema.Record(Schema.String, field(answerValue)).check(
+    Schema.makeFilter(validQuestionKeys)
   )
+  const entity = (catalog: Readonly<Record<string, Schema.Constraint>>) =>
+    Schema.Struct({
+      ...optionalCatalogFields(catalog),
+      [namespace]: Schema.optionalKey(answers),
+    })
+  // oxlint-disable-next-line sort-keys -- Sonar snapshots always nest person before company.
+  const data = Schema.Struct({ person: entity(personCatalog), company: entity(companyCatalog) })
   // oxlint-disable-next-line sort-keys -- Snapshot JSON Schema follows the public status-then-data contract.
   return standard(Schema.Struct({ status: Schema.Literals(["pending", "complete"]), data }))
 }
 
 export const researchOutputSchema = (config: ResearchFactoryConfig) =>
   isDynamicConfig(config)
-    ? dynamicOutputSchema(researchPersonValues, researchCompanyValues)
+    ? dynamicOutputSchema("research", Schema.Json, researchPersonValues, researchCompanyValues)
     : outputSchema(
         config.person,
         config.company,
-        Object.keys(config.research),
+        "research",
+        Schema.Json,
         researchPersonValues,
         researchCompanyValues
       )
 
 export const deepResearchOutputSchema = (config: DeepResearchFactoryConfig) =>
   isDynamicConfig(config)
-    ? dynamicOutputSchema(deepResearchPersonValues, deepResearchCompanyValues)
+    ? dynamicOutputSchema(
+        "deepResearch",
+        Schema.String,
+        deepResearchPersonValues,
+        deepResearchCompanyValues
+      )
     : outputSchema(
         config.person,
         config.company,
-        Object.keys(config.deepResearch),
+        "deepResearch",
+        Schema.String,
         deepResearchPersonValues,
         deepResearchCompanyValues
       )

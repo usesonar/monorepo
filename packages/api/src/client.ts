@@ -3,19 +3,27 @@ import type { KyInstance, Options } from "ky"
 
 import {
   DeepResearchRequest,
-  ResearchRequest,
   SonarResponse,
+  compileResearchRequest,
   snapshotMatchesRequest,
 } from "./schemas.ts"
 import type {
-  AnswersOf,
+  DeepResearchCompanyInput,
   DeepResearchCompanyField,
+  DeepResearchInput,
+  DeepResearchPersonInput,
   DeepResearchPersonField,
   Field,
   JSONValue,
+  ResearchCompanyInput,
+  ResearchInput,
+  ResearchOutput,
+  ResearchPersonInput,
   ResearchPersonField,
   SonarData,
-  ValidQuestions,
+  ValidAnswerMap,
+  ValidDeepResearchEntityInput,
+  ValidResearchEntityInput,
 } from "./schemas.ts"
 
 type CapabilityKey =
@@ -111,142 +119,89 @@ type DeepResearchCatalog = {
   company: Record<DeepResearchCompanyField, string>
 }
 
-type IsAny<Value> = 0 extends 1 & Value ? true : false
+type SelectedFields<Catalog extends Record<string, JSONValue>, Selection extends object> = {
+  [
+    Key in keyof Catalog as Key extends keyof Selection
+      ? true extends Selection[Key]
+        ? object extends Pick<Selection, Key>
+          ? never
+          : Key
+        : never
+      : never
+  ]: Field<Catalog[Key]>
+} & {
+  [
+    Key in keyof Catalog as Key extends keyof Selection
+      ? true extends Selection[Key]
+        ? object extends Pick<Selection, Key>
+          ? Key
+          : never
+        : never
+      : never
+  ]?: Field<Catalog[Key]>
+}
 
-type IsUnion<Value, Whole = Value> = Value extends unknown
-  ? [Whole] extends [Value]
-    ? false
-    : true
-  : never
+type ResearchAnswerFields<Questions extends object> = string extends keyof Questions
+  ? Readonly<Record<string, Field<JSONValue> | undefined>>
+  : { [Key in keyof Questions]: Field<ResearchOutput<Questions[Key]>> }
 
-type TupleHasUnionElement<Keys extends readonly unknown[]> = Keys extends readonly [
-  infer Head,
-  ...infer Tail,
-]
-  ? true extends IsUnion<Head>
-    ? true
-    : TupleHasUnionElement<Tail>
-  : false
+type DeepResearchAnswerFields<Questions extends object> = string extends keyof Questions
+  ? Readonly<Record<string, Field<string> | undefined>>
+  : { [Key in keyof Questions]: Field<string> }
 
-type SelectedCatalogKeys<
-  Catalog extends Record<string, JSONValue>,
-  Keys extends readonly unknown[],
-> = {
-  [Key in keyof Catalog]: [Extract<Keys[number], Key>] extends [never] ? never : Key
-}[keyof Catalog]
-
-type SelectedFields<
-  Catalog extends Record<string, JSONValue>,
-  Keys extends readonly (keyof Catalog)[],
-> = Keys extends unknown
-  ? number extends Keys["length"]
-    ? { [Key in SelectedCatalogKeys<Catalog, Keys>]?: Field<Catalog[Key]> }
-    : true extends TupleHasUnionElement<Keys>
-      ? { [Key in SelectedCatalogKeys<Catalog, Keys>]?: Field<Catalog[Key]> }
-      : { [Key in SelectedCatalogKeys<Catalog, Keys>]: Field<Catalog[Key]> }
-  : never
-
-type AnswerFields<Answers extends object> = string extends keyof Answers
+type RetrievedAnswerFields<Answers extends object> = string extends keyof Answers
   ? Readonly<Record<string, Field<JSONValue> | undefined>>
   : { [Key in keyof Answers]: Field<Extract<Answers[Key], JSONValue>> }
 
-type ResearchRequestInput = Omit<ResearchRequest, "research"> & { research: object }
-type DeepResearchRequestInput = Omit<DeepResearchRequest, "deepResearch"> & {
-  deepResearch: object
+type QuestionsOf<
+  Entity extends object,
+  Tier extends "research" | "deepResearch",
+> = Tier extends keyof Entity ? Extract<NonNullable<Entity[Tier]>, object> : Record<never, never>
+
+type ResearchNamespace<Entity extends object> = keyof QuestionsOf<Entity, "research"> extends never
+  ? object
+  : object extends Pick<Entity, Extract<"research", keyof Entity>>
+    ? { research?: ResearchAnswerFields<QuestionsOf<Entity, "research">> }
+    : { research: ResearchAnswerFields<QuestionsOf<Entity, "research">> }
+
+type DeepResearchNamespace<Entity extends object> = keyof QuestionsOf<
+  Entity,
+  "deepResearch"
+> extends never
+  ? object
+  : object extends Pick<Entity, Extract<"deepResearch", keyof Entity>>
+    ? { deepResearch?: DeepResearchAnswerFields<QuestionsOf<Entity, "deepResearch">> }
+    : { deepResearch: DeepResearchAnswerFields<QuestionsOf<Entity, "deepResearch">> }
+
+export type ResearchData<
+  Person extends ResearchPersonInput,
+  Company extends ResearchCompanyInput,
+> = {
+  person: SelectedFields<ResearchCatalog["person"], Person> & ResearchNamespace<Person>
+  company: SelectedFields<ResearchCatalog["company"], Company> & ResearchNamespace<Company>
 }
-type ValidSelectionValue<Selection> =
-  true extends IsAny<Selection>
-    ? never
-    : Selection extends readonly string[]
-      ? true extends IsAny<Selection[number]>
-        ? never
-        : unknown
-      : never
 
-type ResearchArguments = readonly [client: KyInstance, request: unknown]
-type DeepResearchArguments = readonly [client: KyInstance, request: unknown]
-type ResearchRequestArgument<Arguments extends ResearchArguments> =
-  Arguments[1] extends ResearchRequestInput ? Arguments[1] : never
-type DeepResearchRequestArgument<Arguments extends DeepResearchArguments> =
-  Arguments[1] extends DeepResearchRequestInput ? Arguments[1] : never
+export type DeepResearchData<
+  Person extends DeepResearchPersonInput,
+  Company extends DeepResearchCompanyInput,
+> = {
+  person: SelectedFields<DeepResearchCatalog["person"], Person> & DeepResearchNamespace<Person>
+  company: SelectedFields<DeepResearchCatalog["company"], Company> & DeepResearchNamespace<Company>
+}
 
-type SelectionWithoutAny<Selection> =
-  true extends IsAny<Selection>
-    ? never
-    : Selection extends readonly unknown[]
-      ? {
-          [Index in keyof Selection]: true extends IsAny<Selection[Index]>
-            ? never
-            : Selection[Index]
-        }
-      : never
-
-type ResearchArgumentsWithoutAny<Arguments extends ResearchArguments> = readonly [
-  client: Arguments[0],
-  request: Omit<ResearchRequestArgument<Arguments>, "person" | "company"> & {
-    person: SelectionWithoutAny<ResearchRequestArgument<Arguments>["person"]>
-    company: SelectionWithoutAny<ResearchRequestArgument<Arguments>["company"]>
-  },
-]
-
-type DeepResearchArgumentsWithoutAny<Arguments extends DeepResearchArguments> = readonly [
-  client: Arguments[0],
-  request: Omit<DeepResearchRequestArgument<Arguments>, "person" | "company"> & {
-    person: SelectionWithoutAny<DeepResearchRequestArgument<Arguments>["person"]>
-    company: SelectionWithoutAny<DeepResearchRequestArgument<Arguments>["company"]>
-  },
-]
-
-type ValidResearchArguments<Arguments extends ResearchArguments> =
-  true extends IsAny<Arguments[1]>
-    ? never
-    : [ResearchRequestArgument<Arguments>] extends [never]
-      ? never
-      : [ValidSelectionValue<ResearchRequestArgument<Arguments>["person"]>] extends [never]
-        ? never
-        : [ValidSelectionValue<ResearchRequestArgument<Arguments>["company"]>] extends [never]
-          ? never
-          : ValidQuestions<ResearchRequestArgument<Arguments>["research"]> extends never
-            ? never
-            : unknown
-
-type ValidDeepResearchArguments<Arguments extends DeepResearchArguments> =
-  true extends IsAny<Arguments[1]>
-    ? never
-    : [DeepResearchRequestArgument<Arguments>] extends [never]
-      ? never
-      : [ValidSelectionValue<DeepResearchRequestArgument<Arguments>["person"]>] extends [never]
-        ? never
-        : [ValidSelectionValue<DeepResearchRequestArgument<Arguments>["company"]>] extends [never]
-          ? never
-          : ValidQuestions<DeepResearchRequestArgument<Arguments>["deepResearch"]> extends never
-            ? never
-            : unknown
-
-type ResearchData<Request extends ResearchRequestInput, Answers extends object> = {
-  person: SelectedFields<ResearchCatalog["person"], Request["person"]>
-  company: SelectedFields<ResearchCatalog["company"], Request["company"]>
-} & AnswerFields<Answers>
-
-type DeepResearchData<Request extends DeepResearchRequestInput, Answers extends object> = {
-  person: SelectedFields<DeepResearchCatalog["person"], Request["person"]>
-  company: SelectedFields<DeepResearchCatalog["company"], Request["company"]>
-} & AnswerFields<Answers>
-
-export function createResearch<const Arguments extends ResearchArguments>(
-  ...arguments_: Arguments &
-    ResearchArgumentsWithoutAny<Arguments> &
-    ([ValidResearchArguments<NoInfer<Arguments>>] extends [never] ? never : unknown)
-): Promise<
-  SonarResponse<
-    ResearchData<
-      ResearchRequestArgument<Arguments>,
-      AnswersOf<ResearchRequestArgument<Arguments>["research"]>
-    >
-  >
->
-export async function createResearch(client: KyInstance, request: ResearchRequest) {
-  const body = ResearchRequest.parse(request)
+export function createResearch<
+  const Person extends ResearchPersonInput,
+  const Company extends ResearchCompanyInput,
+>(
+  client: KyInstance,
+  request: ResearchInput<Person, Company> &
+    (Person extends ValidResearchEntityInput<Person> ? unknown : never) &
+    (Company extends ValidResearchEntityInput<Company> ? unknown : never)
+): Promise<SonarResponse<ResearchData<Person, Company>>>
+export async function createResearch(client: KyInstance, request: ResearchInput) {
+  // SAFETY: The public overload already proves this broad implementation input is a valid authored
+  // research request; the compiler performs the matching runtime validation before transport.
+  const body = compileResearchRequest(request as never)
   const response = await client
     .post("/v1/research", {
       headers: { accept: "application/json", "content-type": "application/json" },
@@ -260,18 +215,15 @@ export async function createResearch(client: KyInstance, request: ResearchReques
   }).parse(response)
 }
 
-export function createDeepResearch<const Arguments extends DeepResearchArguments>(
-  ...arguments_: Arguments &
-    DeepResearchArgumentsWithoutAny<Arguments> &
-    ([ValidDeepResearchArguments<NoInfer<Arguments>>] extends [never] ? never : unknown)
-): Promise<
-  SonarResponse<
-    DeepResearchData<
-      DeepResearchRequestArgument<Arguments>,
-      AnswersOf<DeepResearchRequestArgument<Arguments>["deepResearch"]>
-    >
-  >
->
+export function createDeepResearch<
+  const Person extends DeepResearchPersonInput,
+  const Company extends DeepResearchCompanyInput,
+>(
+  client: KyInstance,
+  request: DeepResearchInput<Person, Company> &
+    (Person extends ValidDeepResearchEntityInput<Person> ? unknown : never) &
+    (Company extends ValidDeepResearchEntityInput<Company> ? unknown : never)
+): Promise<SonarResponse<DeepResearchData<Person, Company>>>
 export async function createDeepResearch(client: KyInstance, request: DeepResearchRequest) {
   const body = DeepResearchRequest.parse(request)
   const response = await client
@@ -287,43 +239,80 @@ export async function createDeepResearch(client: KyInstance, request: DeepResear
   }).parse(response)
 }
 
-type OptionalKeys<Value> = {
-  [Key in keyof Value]-?: object extends Pick<Value, Key> ? Key : never
-}[keyof Value]
-
 type IsCallableOrConstructable<Value> = Value extends CallableFunction | NewableFunction
   ? true
   : false
 
-type ValidAnswerValues<Answers extends object> =
+type IsUnion<Value, Whole = Value> = Value extends unknown
+  ? [Whole] extends [Value]
+    ? false
+    : true
+  : never
+
+export type RetrievedAnswerEntity = {
+  research?: object
+  deepResearch?: object
+}
+
+export type RetrievedAnswers = {
+  person?: RetrievedAnswerEntity
+  company?: RetrievedAnswerEntity
+}
+
+type ValidRetrievedEntity<Entity extends RetrievedAnswerEntity> =
+  true extends IsUnion<Entity>
+    ? never
+    : true extends IsCallableOrConstructable<Entity>
+      ? never
+      : [Exclude<keyof Entity, "research" | "deepResearch">] extends [never]
+        ? NonNullable<Entity["research"]> extends ValidAnswerMap<NonNullable<Entity["research"]>>
+          ? NonNullable<Entity["deepResearch"]> extends ValidAnswerMap<
+              NonNullable<Entity["deepResearch"]>
+            >
+            ? Entity
+            : never
+          : never
+        : never
+
+type ValidRetrievedAnswers<Answers extends RetrievedAnswers> =
   true extends IsUnion<Answers>
     ? never
     : true extends IsCallableOrConstructable<Answers>
       ? never
-      : string extends keyof Answers
-        ? never
-        : [Exclude<keyof Answers, string>] extends [never]
-          ? [OptionalKeys<Answers>] extends [never]
-            ? ValidQuestions<{
-                [Key in keyof Answers & string]: string
-              }> extends never
-              ? never
-              : true extends IsAny<Answers[keyof Answers]>
-                ? never
-                : [Answers[keyof Answers]] extends [JSONValue]
-                  ? Answers
-                  : never
-            : never
+      : [Exclude<keyof Answers, "person" | "company">] extends [never]
+        ? Answers extends {
+            person?: infer Person extends RetrievedAnswerEntity
+            company?: infer Company extends RetrievedAnswerEntity
+          }
+          ? Answers & {
+              person?: ValidRetrievedEntity<Person>
+              company?: ValidRetrievedEntity<Company>
+            }
           : never
+        : never
 
-type RetrievedData<Answers extends object> = SonarData & AnswerFields<Answers>
+type RetrievedNamespace<
+  Entity extends RetrievedAnswerEntity,
+  Tier extends "research" | "deepResearch",
+> = Tier extends keyof Entity
+  ? { [Key in Tier]: RetrievedAnswerFields<Extract<NonNullable<Entity[Tier]>, object>> }
+  : object
 
-export function retrieveSonar<const Answers extends object = never>(
+type RetrievedEntityData<Catalog extends object, Entity extends RetrievedAnswerEntity> = Catalog &
+  RetrievedNamespace<Entity, "research"> &
+  RetrievedNamespace<Entity, "deepResearch">
+
+type RetrievedData<Answers extends RetrievedAnswers> = {
+  person: RetrievedEntityData<SonarData["person"], NonNullable<Answers["person"]>>
+  company: RetrievedEntityData<SonarData["company"], NonNullable<Answers["company"]>>
+}
+
+export function retrieveSonar<const Answers extends RetrievedAnswers = never>(
   client: KyInstance,
   hash: string &
     ([Answers] extends [never]
       ? unknown
-      : [Answers] extends [ValidAnswerValues<Answers>]
+      : [Answers] extends [ValidRetrievedAnswers<Answers>]
         ? unknown
         : never)
 ): Promise<[Answers] extends [never] ? SonarResponse : SonarResponse<RetrievedData<Answers>>>

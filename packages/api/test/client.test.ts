@@ -12,8 +12,10 @@ import {
   jsonResponse,
   minimalPendingResearchResponse,
   minimalResearchRequest,
+  minimalResearchWireRequest,
   pendingResearchResponse,
   researchRequest,
+  researchWireRequest,
   resolvedField,
 } from "./fixtures.ts"
 
@@ -36,8 +38,10 @@ const pendingDeepResearchResponse = {
   status: "pending",
   data: {
     person: { phone: { status: "pending" } },
-    company: { legalName: { status: "pending" } },
-    regulatoryStatus: { status: "pending" },
+    company: {
+      legalName: { status: "pending" },
+      deepResearch: { regulatoryStatus: { status: "pending" } },
+    },
   },
 } as const
 
@@ -154,7 +158,7 @@ describe("V-API-02 Ky client and JSON transport", () => {
     expect(request?.headers.get("x-research-instance")).toBe("preserved")
     expect(request?.headers.get("x-research-hook")).toBe("ran")
     expect(hookCalls).toBe(1)
-    expect(await request?.json()).toEqual(researchRequest)
+    expect(await request?.json()).toEqual(researchWireRequest)
   })
 
   test("uses the exact deepResearch JSON route with a secret key", async () => {
@@ -198,20 +202,26 @@ describe("V-API-02 Ky client and JSON transport", () => {
   test("snapshots a changing research request before delayed transport", async () => {
     const fetchStarted = Promise.withResolvers<Request>()
     const responseGate = Promise.withResolvers<Response>()
-    const reads = { seed: 0, ttl: 0, person: 0, company: 0, research: 0 }
+    const reads = { seed: 0, ttl: 0, person: 0, company: 0 }
     const initial = {
       seed: { ...minimalResearchRequest.seed },
       ttl: minimalResearchRequest.ttl,
-      person: [...minimalResearchRequest.person],
-      company: [...minimalResearchRequest.company],
-      research: { ...minimalResearchRequest.research },
+      person: {
+        ...minimalResearchRequest.person,
+        research: { ...minimalResearchRequest.person.research },
+      },
+      company: { ...minimalResearchRequest.company },
     }
     const later = {
       seed: { fullName: "Grace Hopper", email: "grace@example.com" },
       ttl: "7d",
-      person: ["github"],
-      company: ["domain"],
-      research: { changedAnswer: "Changed after invocation." },
+      person: {
+        github: true,
+        research: {
+          changedAnswer: { description: "Changed after invocation.", type: "string" },
+        },
+      },
+      company: { domain: true },
     }
     // SAFETY: Accessor-backed request properties deliberately change after their first read so
     // the runtime boundary can prove it parses the caller value exactly once into an owned copy.
@@ -233,10 +243,6 @@ describe("V-API-02 Ky client and JSON transport", () => {
         company: {
           enumerable: true,
           get: () => ((reads.company += 1) === 1 ? initial.company : later.company),
-        },
-        research: {
-          enumerable: true,
-          get: () => ((reads.research += 1) === 1 ? initial.research : later.research),
         },
       }
     ) as never
@@ -253,34 +259,38 @@ describe("V-API-02 Ky client and JSON transport", () => {
     const result = createResearch(client, changingRequest)
     const sentRequest = await fetchStarted.promise
     initial.seed.email = "mutated@example.com"
-    initial.person.splice(0, initial.person.length, "github")
-    initial.company.splice(0, initial.company.length, "domain")
-    Reflect.deleteProperty(initial.research, "accountSignals")
-    Object.assign(initial.research, { changedAnswer: "Changed while fetch was pending." })
+    Reflect.deleteProperty(initial.person, "title")
+    initial.person.github = true
+    Reflect.deleteProperty(initial.person.research, "accountSignals")
+    initial.company.name = true
     responseGate.resolve(jsonResponse(minimalPendingResearchResponse))
 
     await expect(result).resolves.toEqual(minimalPendingResearchResponse)
-    expect(await sentRequest.json()).toEqual(minimalResearchRequest)
-    expect(reads).toEqual({ seed: 1, ttl: 1, person: 1, company: 1, research: 1 })
+    expect(await sentRequest.json()).toEqual(minimalResearchWireRequest)
+    expect(reads).toEqual({ seed: 1, ttl: 1, person: 1, company: 1 })
   })
 
   test("snapshots a changing deepResearch request before delayed transport", async () => {
     const fetchStarted = Promise.withResolvers<Request>()
     const responseGate = Promise.withResolvers<Response>()
-    const reads = { seed: 0, ttl: 0, person: 0, company: 0, deepResearch: 0 }
+    const reads = { seed: 0, ttl: 0, person: 0, company: 0 }
     const initial = {
       seed: { ...deepResearchRequest.seed },
       ttl: deepResearchRequest.ttl,
-      person: [...deepResearchRequest.person],
-      company: [...deepResearchRequest.company],
-      deepResearch: { ...deepResearchRequest.deepResearch },
+      person: { ...deepResearchRequest.person },
+      company: {
+        ...deepResearchRequest.company,
+        deepResearch: { ...deepResearchRequest.company.deepResearch },
+      },
     }
     const later = {
       seed: { fullName: "Grace Hopper", xURL: "https://x.com/grace" },
       ttl: "7d",
-      person: ["phone"],
-      company: ["legalName"],
-      deepResearch: { changedAnswer: "Changed after invocation." },
+      person: { phone: true },
+      company: {
+        legalName: true,
+        deepResearch: { changedAnswer: "Changed after invocation." },
+      },
     }
     // SAFETY: Accessor-backed request properties deliberately change after their first read so
     // the runtime boundary can prove it parses the caller value exactly once into an owned copy.
@@ -303,10 +313,6 @@ describe("V-API-02 Ky client and JSON transport", () => {
           enumerable: true,
           get: () => ((reads.company += 1) === 1 ? initial.company : later.company),
         },
-        deepResearch: {
-          enumerable: true,
-          get: () => ((reads.deepResearch += 1) === 1 ? initial.deepResearch : later.deepResearch),
-        },
       }
     ) as never
     const client = createSonar({
@@ -322,13 +328,13 @@ describe("V-API-02 Ky client and JSON transport", () => {
     const result = createDeepResearch(client, changingRequest)
     const sentRequest = await fetchStarted.promise
     initial.seed.email = "mutated@example.com"
-    initial.deepResearch.regulatoryStatus = "Changed while fetch was pending."
-    Object.assign(initial.deepResearch, { changedAnswer: "New key after invocation." })
+    initial.company.deepResearch.regulatoryStatus = "Changed while fetch was pending."
+    Object.assign(initial.company.deepResearch, { changedAnswer: "New key after invocation." })
     responseGate.resolve(jsonResponse(pendingDeepResearchResponse))
 
     await expect(result).resolves.toEqual(pendingDeepResearchResponse)
     expect(await sentRequest.json()).toEqual(deepResearchRequest)
-    expect(reads).toEqual({ seed: 1, ttl: 1, person: 1, company: 1, deepResearch: 1 })
+    expect(reads).toEqual({ seed: 1, ttl: 1, person: 1, company: 1 })
   })
 
   test("retrieves by an encoded hash using GET and validates the response", async () => {
@@ -364,12 +370,18 @@ describe("V-API-02 Ky client and JSON transport", () => {
     expect(calls).toHaveLength(0)
   })
 
-  test("keeps retrieve nested catalogs closed while allowing top-level custom answers", async () => {
+  test("keeps retrieve built-ins closed while allowing nested custom answers", async () => {
     const withCustomAnswer = {
       ...completeResearchResponse,
       data: {
         ...completeResearchResponse.data,
-        investmentThesis: resolvedField({ fit: "high", evidence: ["public signal"] }),
+        person: {
+          ...completeResearchResponse.data.person,
+          research: {
+            ...completeResearchResponse.data.person.research,
+            investmentThesis: resolvedField({ fit: "high", evidence: ["public signal"] }),
+          },
+        },
       },
     }
     const validClient = createSonar({
@@ -423,7 +435,7 @@ describe("V-API-02 Ky client and JSON transport", () => {
     })
 
     // SAFETY: The wrong-tier field is intentional and must be rejected at the runtime boundary.
-    const invalidRequest = { ...researchRequest, person: ["phone"] } as never
+    const invalidRequest = { ...researchRequest, person: { phone: true } } as never
     await expect(createResearch(client, invalidRequest)).rejects.toThrow()
     expect(calls).toHaveLength(0)
   })
@@ -468,7 +480,6 @@ describe("V-API-02 Ky client and JSON transport", () => {
         data: {
           person: {},
           company: minimalPendingResearchResponse.data.company,
-          accountSignals: { status: "pending" },
         },
       },
       {
@@ -477,9 +488,9 @@ describe("V-API-02 Ky client and JSON transport", () => {
           person: {
             title: { status: "pending" },
             phone: { status: "pending" },
+            research: minimalPendingResearchResponse.data.person.research,
           },
           company: minimalPendingResearchResponse.data.company,
-          accountSignals: { status: "pending" },
         },
       },
       {
@@ -487,7 +498,6 @@ describe("V-API-02 Ky client and JSON transport", () => {
         data: {
           person: minimalPendingResearchResponse.data.person,
           company: {},
-          accountSignals: { status: "pending" },
         },
       },
       {
@@ -498,23 +508,26 @@ describe("V-API-02 Ky client and JSON transport", () => {
             name: { status: "pending" },
             legalName: { status: "pending" },
           },
-          accountSignals: { status: "pending" },
         },
       },
       {
         ...minimalPendingResearchResponse,
         data: {
-          person: minimalPendingResearchResponse.data.person,
+          person: { title: { status: "pending" } },
           company: minimalPendingResearchResponse.data.company,
         },
       },
       {
         ...minimalPendingResearchResponse,
         data: {
-          person: minimalPendingResearchResponse.data.person,
+          person: {
+            ...minimalPendingResearchResponse.data.person,
+            research: {
+              ...minimalPendingResearchResponse.data.person.research,
+              unrequestedAnswer: { status: "pending" },
+            },
+          },
           company: minimalPendingResearchResponse.data.company,
-          accountSignals: { status: "pending" },
-          unrequestedAnswer: { status: "pending" },
         },
       },
     ]
@@ -534,19 +547,26 @@ describe("V-API-02 Ky client and JSON transport", () => {
   test("requires requested custom answers to be own JSON response properties", async () => {
     const prototypeKeyRequest = {
       ...minimalResearchRequest,
-      research: { toString: "What is the public description?" },
+      person: {
+        title: true,
+        research: {
+          toString: { description: "What is the public description?", type: "string" },
+        },
+      },
     } as const
     const sameCountWrongKeyResponse = {
       ...minimalPendingResearchResponse,
       data: {
-        person: minimalPendingResearchResponse.data.person,
+        person: {
+          title: { status: "pending" },
+          research: { foo: { status: "pending" } },
+        },
         company: minimalPendingResearchResponse.data.company,
-        foo: { status: "pending" },
       },
     } as const
-    expect(Object.keys(sameCountWrongKeyResponse.data)).toHaveLength(3)
-    expect(Object.hasOwn(sameCountWrongKeyResponse.data, "toString")).toBe(false)
-    expect("toString" in sameCountWrongKeyResponse.data).toBe(true)
+    expect(Object.keys(sameCountWrongKeyResponse.data.person.research)).toHaveLength(1)
+    expect(Object.hasOwn(sameCountWrongKeyResponse.data.person.research, "toString")).toBe(false)
+    expect("toString" in sameCountWrongKeyResponse.data.person.research).toBe(true)
 
     const client = createSonar({
       baseURL: "https://api.example.test/",
@@ -801,7 +821,7 @@ describe("V-API-02 Ky client and JSON transport", () => {
     })
     expect(response.data.company.location.value).toEqual({ city: "London", country: "GB" })
     expect(response.data.company.funding.value).toEqual({ totalUSD: 1_000_000, rounds: ["seed"] })
-    expect(response.data.accountSignals.value).toEqual({
+    expect(response.data.person.research.accountSignals.value).toEqual({
       intent: "high",
       evidence: ["Hiring finance operators"],
     })

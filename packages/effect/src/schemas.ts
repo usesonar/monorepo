@@ -2,14 +2,16 @@ import {
   DeepResearchRequest as APIDeepResearchRequest,
   Field as APIField,
   JSONValue as APIJSONValue,
-  ResearchRequest as APIResearchRequest,
   SonarSeed as APISonarSeed,
   SonarSnapshot as APISonarSnapshot,
   TTL as APITTL,
+  compileResearchRequest,
 } from "@usesonar/api"
 import { Effect, Schema, SchemaIssue, SchemaTransformation } from "effect"
 
 import type {
+  AnyDeepResearchConfig,
+  AnyResearchConfig,
   DeepResearchConfig,
   DeepResearchRequest as DeepResearchRequestType,
   Field as FieldType,
@@ -21,18 +23,14 @@ import type {
   TTL as TTLType,
 } from "./model.js"
 
-export { question } from "@usesonar/api"
-export type { AnswerOf, AnswersOf, Question } from "@usesonar/api"
-
 export type JSONValue = JSONValueType
 export type SonarSeed = SonarSeedType
 export type TTL = TTLType
-export type ResearchRequest<C extends ResearchConfig<object> = ResearchConfig> =
-  ResearchRequestType<C>
-export type DeepResearchRequest<C extends DeepResearchConfig<object> = DeepResearchConfig> =
+export type ResearchRequest<C extends AnyResearchConfig = ResearchConfig> = ResearchRequestType<C>
+export type DeepResearchRequest<C extends AnyDeepResearchConfig = DeepResearchConfig> =
   DeepResearchRequestType<C>
 export type Field<Value = JSONValueType> = FieldType<Value>
-export type SonarSnapshot<C extends ResearchConfig<object> | DeepResearchConfig<object>> =
+export type SonarSnapshot<C extends AnyResearchConfig | AnyDeepResearchConfig> =
   SonarSnapshotType<C>
 
 export const JSONValue: Schema.Codec<JSONValueType> = Schema.declare<JSONValueType>(
@@ -68,8 +66,15 @@ export const TTL: Schema.Codec<TTLType> = Schema.declare<TTLType>(
 )
 
 const NormalizedResearchRequest = Schema.declare<ResearchRequestType<ResearchConfig>>(
-  (input): input is ResearchRequestType<ResearchConfig> =>
-    APIResearchRequest.safeParse(input).success,
+  (input): input is ResearchRequestType<ResearchConfig> => {
+    try {
+      // SAFETY: This predicate accepts unknown input specifically so the API compiler can validate it.
+      compileResearchRequest(input as never)
+      return true
+    } catch {
+      return false
+    }
+  },
   { identifier: "ResearchRequest" }
 )
 
@@ -81,12 +86,14 @@ export const ResearchRequest: Schema.Codec<
     NormalizedResearchRequest,
     SchemaTransformation.transformOrFail<ResearchRequestType<ResearchConfig>, unknown>({
       decode: (input, options) => {
-        const parsed = APIResearchRequest.safeParse(input)
-        return parsed.success
-          ? Effect.succeed(parsed.data)
-          : Effect.fail(
-              new SchemaIssue.InvalidValue({ message: "Invalid research request" }, input, options)
-            )
+        try {
+          // SAFETY: The API compiler is the runtime validator for authored research inputs.
+          return Effect.succeed(compileResearchRequest(input as never))
+        } catch {
+          return Effect.fail(
+            new SchemaIssue.InvalidValue({ message: "Invalid research request" }, input, options)
+          )
+        }
       },
       encode: Effect.succeed,
     })
@@ -128,9 +135,10 @@ export const Field: Schema.Codec<FieldType> = Schema.declare<FieldType>(
   { identifier: "Field" }
 )
 
-export const SonarSnapshot: Schema.Codec<SonarSnapshotType<ResearchConfig | DeepResearchConfig>> =
-  Schema.declare<SonarSnapshotType<ResearchConfig | DeepResearchConfig>>(
-    (input): input is SonarSnapshotType<ResearchConfig | DeepResearchConfig> =>
-      APISonarSnapshot.safeParse(input).success,
-    { identifier: "SonarSnapshot" }
-  )
+export const SonarSnapshot: Schema.Codec<
+  SonarSnapshotType<AnyResearchConfig | AnyDeepResearchConfig>
+> = Schema.declare<SonarSnapshotType<AnyResearchConfig | AnyDeepResearchConfig>>(
+  (input): input is SonarSnapshotType<AnyResearchConfig | AnyDeepResearchConfig> =>
+    APISonarSnapshot.safeParse(input).success,
+  { identifier: "SonarSnapshot" }
+)

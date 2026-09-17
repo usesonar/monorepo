@@ -2,7 +2,7 @@ import { Effect, Option, Schema } from "effect"
 
 import { ProtocolError } from "./errors.js"
 import { fieldAtPath, snapshotPaths, withField } from "./model.js"
-import type { DeepResearchConfig, ResearchConfig, SonarSnapshot } from "./model.js"
+import type { AnyDeepResearchConfig, AnyResearchConfig, SonarSnapshot } from "./model.js"
 import { Field } from "./schemas.js"
 
 const ProtocolEvent = Schema.Union([
@@ -12,7 +12,7 @@ const ProtocolEvent = Schema.Union([
 
 const protocolFailure = (message: string) => Effect.fail(new ProtocolError({ message }))
 
-export const reduceSnapshot = <const C extends ResearchConfig<object> | DeepResearchConfig<object>>(
+export const reduceSnapshot = <const C extends AnyResearchConfig | AnyDeepResearchConfig>(
   snapshot: SonarSnapshot<C>,
   // oxlint-disable-next-line anti-slop/no-unknown-parameters -- This public boundary immediately decodes adversarial input with ProtocolEvent.
   input: unknown

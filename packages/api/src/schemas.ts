@@ -1,6 +1,24 @@
+/* eslint-disable anti-slop/no-runtime-typeof, anti-slop/no-unknown-parameters, anti-slop/no-unsafe-dictionary-type -- StandardJSONSchemaV1 exposes unknown keyword records, and the authored-input compiler must discriminate executable validator objects before parsing their compiled JSON Schema at the HTTP boundary. */
 // oxlint-disable sort-keys -- Schema declaration order preserves the public person-before-company wire order.
 
 import { z } from "zod"
+
+export type StandardJSONSchemaV1<Input = unknown, Output = Input> = {
+  readonly "~standard": {
+    readonly version: 1
+    readonly vendor: string
+    readonly types?: { readonly input: Input; readonly output: Output }
+    readonly jsonSchema: {
+      readonly input: (options: StandardJSONSchemaOptions) => Record<string, unknown>
+      readonly output: (options: StandardJSONSchemaOptions) => Record<string, unknown>
+    }
+  }
+}
+
+export type StandardJSONSchemaOptions = {
+  readonly target: string
+  readonly libraryOptions?: Record<string, unknown>
+}
 
 export type JSONValue =
   | null
@@ -275,9 +293,6 @@ export const TTL = z
   })
 export type TTL = z.infer<typeof TTL>
 
-const uniqueFields = <Value extends string>(values: readonly Value[]) =>
-  z.array(z.enum(values)).refine((fields) => new Set(fields).size === fields.length)
-
 const customKeyPattern = /^[a-z][A-Za-z0-9]*$/u
 const reservedCustomKeys = new Set(["ttl", "person", "company", "research", "deepResearch"])
 const isValidCustomKey = (key: string) => customKeyPattern.test(key) && !reservedCustomKeys.has(key)
@@ -346,49 +361,111 @@ type IsCallableOrConstructable<Value> = Value extends CallableFunction | Newable
   ? true
   : false
 
-type QuestionValuesAreStrings<Questions extends object> =
-  true extends IsAny<Questions[keyof Questions]>
-    ? false
-    : [Questions[keyof Questions]] extends [string]
-      ? true
-      : false
-
-export type ValidQuestions<Questions extends object> =
+type ValidQuestionKeys<Questions extends object> =
   true extends IsUnion<Questions>
     ? never
     : true extends IsCallableOrConstructable<Questions>
       ? never
       : [Exclude<keyof Questions, string>] extends [never]
         ? [OptionalKeys<Questions>] extends [never]
-          ? true extends QuestionValuesAreStrings<Questions>
-            ? string extends keyof Questions
+          ? string extends keyof Questions
+            ? Questions
+            : [InvalidQuestionKeys<Questions>] extends [never]
               ? Questions
-              : [InvalidQuestionKeys<Questions>] extends [never]
-                ? Questions
-                : never
-            : never
+              : never
           : never
         : never
 
-declare const QuestionAnswer: unique symbol
-export type Question<Answer extends JSONValue = JSONValue> = string & {
-  readonly [QuestionAnswer]: (answer: Answer) => Answer
+type DeepResearchQuestionValuesAreStrings<Questions extends object> =
+  true extends IsAny<Questions[keyof Questions]>
+    ? false
+    : [Questions[keyof Questions]] extends [string]
+      ? true
+      : false
+
+export type ValidDeepResearchQuestions<Questions extends object> =
+  ValidQuestionKeys<Questions> extends never
+    ? never
+    : true extends DeepResearchQuestionValuesAreStrings<Questions>
+      ? Questions
+      : never
+
+const DeepResearchQuestions = rejectPrototypeKey(
+  z.record(z.string(), z.string().trim().min(1)).superRefine((questions, context) => {
+    for (const key of Object.keys(questions)) {
+      if (!isValidCustomKey(key)) {
+        context.addIssue({ code: "custom", message: `Invalid custom answer key: ${key}` })
+      }
+    }
+  })
+)
+
+export type ResearchJSONSchema = {
+  readonly description: string
+  readonly [keyword: string]: JSONValue
 }
 
-export const question = <Answer extends JSONValue = JSONValue>(prompt: string): Question<Answer> =>
-  // SAFETY: The required private brand carries compile-time answer metadata only; requests send
-  // the original prompt string, which the runtime Questions schema still validates and normalizes.
-  prompt as Question<Answer>
+export type ResearchValidator<Output extends JSONValue = JSONValue> =
+  | z.ZodType<Output>
+  | StandardJSONSchemaV1<unknown, Output>
 
-export type AnswerOf<QuestionValue> =
-  QuestionValue extends Question<infer Answer> ? Answer : JSONValue
+export type ResearchQuestion = ResearchJSONSchema | ResearchValidator
 
-export type AnswersOf<Questions extends object> = string extends keyof Questions
-  ? Readonly<Partial<Record<string, JSONValue>>>
-  : { readonly [Key in keyof Questions & string]: AnswerOf<Questions[Key]> }
+export type ResearchOutput<Question> =
+  Question extends z.ZodType<infer Output>
+    ? Extract<Output, JSONValue>
+    : Question extends StandardJSONSchemaV1<unknown, infer Output>
+      ? Extract<Output, JSONValue>
+      : JSONValue
 
-const Questions = rejectPrototypeKey(
-  z.record(z.string(), z.string().trim().min(1)).superRefine((questions, context) => {
+type ResearchQuestionIsValid<QuestionValue> =
+  true extends IsAny<QuestionValue>
+    ? false
+    : QuestionValue extends z.ZodType<infer Output>
+      ? [Output] extends [JSONValue]
+        ? true
+        : false
+      : QuestionValue extends StandardJSONSchemaV1<unknown, infer Output>
+        ? [Output] extends [JSONValue]
+          ? true
+          : false
+        : QuestionValue extends ResearchJSONSchema
+          ? true
+          : false
+
+type ResearchQuestionValuesAreValid<Questions extends object> = false extends {
+  [Key in keyof Questions]: ResearchQuestionIsValid<Questions[Key]>
+}[keyof Questions]
+  ? false
+  : true
+
+export type ValidResearchQuestions<Questions extends object> =
+  ValidQuestionKeys<Questions> extends never
+    ? never
+    : true extends ResearchQuestionValuesAreValid<Questions>
+      ? Questions
+      : never
+
+type AnswerValuesAreJSON<Answers extends object> =
+  true extends IsAny<Answers[keyof Answers]>
+    ? false
+    : [Answers[keyof Answers]] extends [JSONValue]
+      ? true
+      : false
+
+export type ValidAnswerMap<Answers extends object> =
+  ValidQuestionKeys<Answers> extends never
+    ? never
+    : true extends AnswerValuesAreJSON<Answers>
+      ? Answers
+      : never
+
+const ResearchJSONSchema: z.ZodType<ResearchJSONSchema> = jsonBoundary(
+  rejectPrototypeKey(z.object({ description: z.string().trim().min(1) }).catchall(JSONValue))
+)
+
+const ResearchQuestions = rejectPrototypeKey(
+  z.record(z.string(), ResearchJSONSchema).superRefine((questions, context) => {
     for (const key of Object.keys(questions)) {
       if (!isValidCustomKey(key)) {
         context.addIssue({ code: "custom", message: `Invalid custom answer key: ${key}` })
@@ -410,14 +487,40 @@ const researchCompanyFields = [
 const deepResearchPersonFields = ["phone"] as const
 const deepResearchCompanyFields = ["legalName"] as const
 
+const ResearchPersonRequest = rejectPrototypeKey(
+  z
+    .object({
+      linkedin: z.literal(true).optional(),
+      title: z.literal(true).optional(),
+      x: z.literal(true).optional(),
+      github: z.literal(true).optional(),
+      research: ResearchQuestions.optional(),
+    })
+    .strict()
+)
+
+const ResearchCompanyRequest = rejectPrototypeKey(
+  z
+    .object({
+      domain: z.literal(true).optional(),
+      name: z.literal(true).optional(),
+      logo: z.literal(true).optional(),
+      colors: z.literal(true).optional(),
+      location: z.literal(true).optional(),
+      description: z.literal(true).optional(),
+      funding: z.literal(true).optional(),
+      research: ResearchQuestions.optional(),
+    })
+    .strict()
+)
+
 const ResearchRequestSchema = rejectPrototypeKey(
   z
     .object({
       seed: SonarSeed,
       ttl: TTL,
-      person: uniqueFields(researchPersonFields),
-      company: uniqueFields(researchCompanyFields),
-      research: Questions,
+      person: ResearchPersonRequest,
+      company: ResearchCompanyRequest,
     })
     .strict()
 )
@@ -425,20 +528,213 @@ export const ResearchRequest = jsonBoundary(ResearchRequestSchema)
 export type ResearchRequest = {
   seed: SonarSeed
   ttl: TTL
-  person: readonly (typeof researchPersonFields)[number][]
-  company: readonly (typeof researchCompanyFields)[number][]
-  research: Readonly<Record<string, string>>
-  deepResearch?: never
+  person: Partial<Record<(typeof researchPersonFields)[number], true>> & {
+    research?: Readonly<Record<string, ResearchJSONSchema>>
+  }
+  company: Partial<Record<(typeof researchCompanyFields)[number], true>> & {
+    research?: Readonly<Record<string, ResearchJSONSchema>>
+  }
 }
+
+export type ResearchPersonInput<
+  Questions extends object = Readonly<Record<string, ResearchQuestion>>,
+> = Partial<Record<(typeof researchPersonFields)[number], true>> & { research?: Questions }
+
+export type ResearchCompanyInput<
+  Questions extends object = Readonly<Record<string, ResearchQuestion>>,
+> = Partial<Record<(typeof researchCompanyFields)[number], true>> & { research?: Questions }
+
+export type ResearchInput<
+  Person extends ResearchPersonInput = ResearchPersonInput,
+  Company extends ResearchCompanyInput = ResearchCompanyInput,
+> = {
+  seed: SonarSeed
+  ttl: TTL
+  person: Person
+  company: Company
+}
+
+export type ValidResearchEntityInput<Entity extends ResearchPersonInput | ResearchCompanyInput> =
+  NonNullable<Entity["research"]> extends ValidResearchQuestions<NonNullable<Entity["research"]>>
+    ? Entity
+    : never
+
+export type ValidResearchInput<Input extends ResearchInput> =
+  Input extends ResearchInput<infer Person, infer Company>
+    ? ResearchInput<ValidResearchEntityInput<Person>, ValidResearchEntityInput<Company>>
+    : never
+
+type OwnEntry = readonly [key: string, value: unknown]
+
+const ownEnumerableEntries = (input: unknown, label: string): OwnEntry[] => {
+  if (input === null || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError(`${label} must be an object`)
+  }
+  const prototype = Object.getPrototypeOf(input)
+  if (prototype !== Object.prototype && prototype !== null) {
+    throw new TypeError(`${label} must be a plain object`)
+  }
+
+  const entries: OwnEntry[] = []
+  for (const rawKey of Reflect.ownKeys(input)) {
+    if (typeof rawKey !== "string") {
+      throw new TypeError(`${label} cannot contain symbol keys`)
+    }
+    const descriptor = Object.getOwnPropertyDescriptor(input, rawKey)
+    if (!descriptor?.enumerable) {
+      throw new TypeError(`${label} properties must be enumerable`)
+    }
+    if ("value" in descriptor) {
+      entries.push([rawKey, descriptor.value])
+      continue
+    }
+    if (!descriptor.get) {
+      throw new TypeError(`${label} accessors must provide a getter`)
+    }
+    entries.push([rawKey, descriptor.get.call(input)])
+  }
+  return entries
+}
+
+const questionSchema = (questionValue: unknown, label: string): ResearchJSONSchema => {
+  let schema: unknown
+  if (questionValue instanceof z.ZodType) {
+    schema = questionValue["~standard"].jsonSchema.output({ target: "draft-2020-12" })
+  } else if (
+    questionValue !== null &&
+    typeof questionValue === "object" &&
+    "~standard" in questionValue
+  ) {
+    // SAFETY: This branch established the Standard Schema marker; the checks below validate both
+    // converter methods before either can be called.
+    const standard = questionValue as StandardJSONSchemaV1
+    const properties = standard["~standard"]
+    if (
+      properties.version !== 1 ||
+      typeof properties.jsonSchema?.output !== "function" ||
+      typeof properties.jsonSchema?.input !== "function"
+    ) {
+      throw new TypeError(`${label} must implement StandardJSONSchemaV1`)
+    }
+    schema = properties.jsonSchema.output({ target: "draft-2020-12" })
+  } else {
+    schema = questionValue
+  }
+
+  try {
+    const serializable =
+      schema !== null && typeof schema === "object" && !Array.isArray(schema)
+        ? { ...schema }
+        : schema
+    return ResearchJSONSchema.parse(serializable)
+  } catch (error) {
+    throw new TypeError(`${label} must compile to JSON Schema with a non-empty root description`, {
+      cause: error,
+    })
+  }
+}
+
+const compileResearchQuestions = (input: unknown, label: string) => {
+  const output: Record<string, ResearchJSONSchema> = {}
+  for (const [key, questionValue] of ownEnumerableEntries(input, label)) {
+    if (!isValidCustomKey(key)) {
+      throw new TypeError(`Invalid custom answer key: ${key}`)
+    }
+    output[key] = questionSchema(questionValue, `${label}.${key}`)
+  }
+  return output
+}
+
+const compileResearchEntity = (
+  input: unknown,
+  label: "person" | "company",
+  builtIns: readonly string[]
+) => {
+  const entries = new Map(ownEnumerableEntries(input, label))
+  const output: Record<string, true | Record<string, ResearchJSONSchema>> = {}
+  for (const key of builtIns) {
+    if (!entries.has(key)) {
+      continue
+    }
+    if (entries.get(key) !== true) {
+      throw new TypeError(`${label}.${key} must be true when selected`)
+    }
+    output[key] = true
+    entries.delete(key)
+  }
+  if (entries.has("research")) {
+    output.research = compileResearchQuestions(entries.get("research"), `${label}.research`)
+    entries.delete("research")
+  }
+  const unknownKey = entries.keys().next().value
+  if (typeof unknownKey === "string") {
+    throw new TypeError(`Unknown ${label} research field: ${unknownKey}`)
+  }
+  return output
+}
+
+export function compileResearchRequest<
+  const Person extends ResearchPersonInput,
+  const Company extends ResearchCompanyInput,
+>(
+  input: ResearchInput<Person, Company> &
+    (NonNullable<Person["research"]> extends ValidResearchQuestions<NonNullable<Person["research"]>>
+      ? unknown
+      : never) &
+    (NonNullable<Company["research"]> extends ValidResearchQuestions<
+      NonNullable<Company["research"]>
+    >
+      ? unknown
+      : never)
+): ResearchRequest
+export function compileResearchRequest(input: ResearchInput): ResearchRequest {
+  const entries = new Map(ownEnumerableEntries(input, "Research input"))
+  const seed = entries.get("seed")
+  const ttl = entries.get("ttl")
+  const person = entries.get("person")
+  const company = entries.get("company")
+  entries.delete("seed")
+  entries.delete("ttl")
+  entries.delete("person")
+  entries.delete("company")
+  const unknownKey = entries.keys().next().value
+  if (typeof unknownKey === "string") {
+    throw new TypeError(`Unknown research input field: ${unknownKey}`)
+  }
+
+  return ResearchRequest.parse({
+    seed,
+    ttl,
+    person: compileResearchEntity(person, "person", researchPersonFields),
+    company: compileResearchEntity(company, "company", researchCompanyFields),
+  })
+}
+
+const DeepResearchPersonRequest = rejectPrototypeKey(
+  z
+    .object({
+      phone: z.literal(true).optional(),
+      deepResearch: DeepResearchQuestions.optional(),
+    })
+    .strict()
+)
+
+const DeepResearchCompanyRequest = rejectPrototypeKey(
+  z
+    .object({
+      legalName: z.literal(true).optional(),
+      deepResearch: DeepResearchQuestions.optional(),
+    })
+    .strict()
+)
 
 const DeepResearchRequestSchema = rejectPrototypeKey(
   z
     .object({
       seed: SonarSeed,
       ttl: TTL,
-      person: uniqueFields(deepResearchPersonFields),
-      company: uniqueFields(deepResearchCompanyFields),
-      deepResearch: Questions,
+      person: DeepResearchPersonRequest,
+      company: DeepResearchCompanyRequest,
     })
     .strict()
 )
@@ -446,11 +742,43 @@ export const DeepResearchRequest = jsonBoundary(DeepResearchRequestSchema)
 export type DeepResearchRequest = {
   seed: SonarSeed
   ttl: TTL
-  person: readonly (typeof deepResearchPersonFields)[number][]
-  company: readonly (typeof deepResearchCompanyFields)[number][]
-  deepResearch: Readonly<Record<string, string>>
-  research?: never
+  person: Partial<Record<(typeof deepResearchPersonFields)[number], true>> & {
+    deepResearch?: Readonly<Record<string, string>>
+  }
+  company: Partial<Record<(typeof deepResearchCompanyFields)[number], true>> & {
+    deepResearch?: Readonly<Record<string, string>>
+  }
 }
+
+export type DeepResearchPersonInput<Questions extends object = Readonly<Record<string, string>>> =
+  Partial<Record<(typeof deepResearchPersonFields)[number], true>> & { deepResearch?: Questions }
+
+export type DeepResearchCompanyInput<Questions extends object = Readonly<Record<string, string>>> =
+  Partial<Record<(typeof deepResearchCompanyFields)[number], true>> & { deepResearch?: Questions }
+
+export type DeepResearchInput<
+  Person extends DeepResearchPersonInput = DeepResearchPersonInput,
+  Company extends DeepResearchCompanyInput = DeepResearchCompanyInput,
+> = {
+  seed: SonarSeed
+  ttl: TTL
+  person: Person
+  company: Company
+}
+
+export type ValidDeepResearchEntityInput<
+  Entity extends DeepResearchPersonInput | DeepResearchCompanyInput,
+> =
+  NonNullable<Entity["deepResearch"]> extends ValidDeepResearchQuestions<
+    NonNullable<Entity["deepResearch"]>
+  >
+    ? Entity
+    : never
+
+export type ValidDeepResearchInput<Input extends DeepResearchInput> =
+  Input extends DeepResearchInput<infer Person, infer Company>
+    ? DeepResearchInput<ValidDeepResearchEntityInput<Person>, ValidDeepResearchEntityInput<Company>>
+    : never
 
 const PendingField = z.object({ status: z.literal("pending") }).strict()
 const ResolvedField = z
@@ -528,6 +856,26 @@ export type SonarData = {
   company: CatalogFields<CompanyFieldValues>
 }
 
+const ResearchAnswerData = rejectPrototypeKey(
+  z.record(z.string(), Field).superRefine((answers, context) => {
+    for (const key of Object.keys(answers)) {
+      if (!isValidCustomKey(key)) {
+        context.addIssue({ code: "custom", message: `Invalid custom answer key: ${key}` })
+      }
+    }
+  })
+)
+
+const DeepResearchAnswerData = rejectPrototypeKey(
+  z.record(z.string(), StringField).superRefine((answers, context) => {
+    for (const key of Object.keys(answers)) {
+      if (!isValidCustomKey(key)) {
+        context.addIssue({ code: "custom", message: `Invalid custom answer key: ${key}` })
+      }
+    }
+  })
+)
+
 const PersonData = rejectPrototypeKey(
   z
     .object({
@@ -536,6 +884,8 @@ const PersonData = rejectPrototypeKey(
       x: StringField.optional(),
       github: StringField.optional(),
       phone: StringField.optional(),
+      research: ResearchAnswerData.optional(),
+      deepResearch: DeepResearchAnswerData.optional(),
     })
     .strict()
 )
@@ -551,6 +901,8 @@ const CompanyData = rejectPrototypeKey(
       description: StringField.optional(),
       funding: Field.optional(),
       legalName: StringField.optional(),
+      research: ResearchAnswerData.optional(),
+      deepResearch: DeepResearchAnswerData.optional(),
     })
     .strict()
 )
@@ -561,18 +913,7 @@ const SonarData = rejectPrototypeKey(
       person: PersonData,
       company: CompanyData,
     })
-    .catchall(Field)
-    .superRefine((data, context) => {
-      for (const key of Object.keys(data)) {
-        if (key !== "person" && key !== "company" && !isValidCustomKey(key)) {
-          context.addIssue({
-            code: "custom",
-            path: [key],
-            message: `Invalid custom answer key: ${key}`,
-          })
-        }
-      }
-    })
+    .strict()
 )
 
 type ParsedSonarData = z.infer<typeof SonarData>
@@ -590,12 +931,19 @@ const stringPaths = new Set([
   "company.legalName",
 ])
 const richJSONPaths = new Set(["company.colors", "company.location", "company.funding"])
+const customPathPattern =
+  /^(?<entity>person|company)\.(?<tier>research|deepResearch)\.(?<key>[a-z][A-Za-z0-9]*)$/u
 
 export const fieldMatchesPath = (path: string, field: ParsedField) => {
   const isAbsoluteURL = absoluteURLPaths.has(path)
   const isString = stringPaths.has(path)
   const isRichJSON = richJSONPaths.has(path)
-  if (!(isAbsoluteURL || isString || isRichJSON || isValidCustomKey(path))) {
+  const customPath = customPathPattern.exec(path)
+  const isResearch =
+    customPath?.groups?.tier === "research" && isValidCustomKey(customPath.groups.key ?? "")
+  const isDeepResearch =
+    customPath?.groups?.tier === "deepResearch" && isValidCustomKey(customPath.groups.key ?? "")
+  if (!(isAbsoluteURL || isString || isRichJSON || isResearch || isDeepResearch)) {
     return false
   }
   if (field.status !== "resolved") {
@@ -604,18 +952,25 @@ export const fieldMatchesPath = (path: string, field: ParsedField) => {
   if (isAbsoluteURL) {
     return AbsoluteURL.safeParse(field.value).success
   }
-  if (isString) {
+  if (isString || isDeepResearch) {
     return StringValue.safeParse(field.value).success
   }
   return true
 }
 
 const containsPending = (data: ParsedSonarData): boolean => {
-  const builtInFields = [...Object.values(data.person), ...Object.values(data.company)]
-  const customFields = Object.entries(data)
-    .filter(([key]) => key !== "person" && key !== "company")
-    .map(([, field]) => Field.parse(field))
-  return [...builtInFields, ...customFields].some((field) => field.status === "pending")
+  const fields = [data.person, data.company].flatMap((entity) =>
+    Object.entries(entity).flatMap(([key, value]) => {
+      if (key === "research") {
+        return Object.values(ResearchAnswerData.parse(value))
+      }
+      if (key === "deepResearch") {
+        return Object.values(DeepResearchAnswerData.parse(value))
+      }
+      return [Field.parse(value)]
+    })
+  )
+  return fields.some((field) => field.status === "pending")
 }
 
 const validateSnapshot = (
@@ -635,7 +990,10 @@ const validateSnapshot = (
     ["company", snapshot.data.company],
   ] as const) {
     for (const [key, field] of Object.entries(fields)) {
-      if (!fieldMatchesPath(`${slot}.${key}`, field)) {
+      if (key === "research" || key === "deepResearch") {
+        continue
+      }
+      if (!fieldMatchesPath(`${slot}.${key}`, Field.parse(field))) {
         context.addIssue({
           code: "custom",
           path: ["data", slot, key, "value"],
@@ -663,31 +1021,86 @@ export type SonarSnapshot<Data extends SonarData = SonarData> = {
 }
 
 type SnapshotRequest = ResearchRequest | DeepResearchRequest
-type SnapshotFieldCollection =
+type ResearchTier = "research" | "deepResearch"
+type SnapshotEntityCollection = SonarSnapshot["data"]["person"] | SonarSnapshot["data"]["company"]
+type SnapshotKeyCollection =
   | SonarSnapshot["data"]
-  | SonarSnapshot["data"]["person"]
-  | SonarSnapshot["data"]["company"]
+  | SnapshotEntityCollection
+  | Readonly<Record<string, JSONValue>>
 
-const hasExactlyKeys = (actual: SnapshotFieldCollection, expected: readonly string[]) => {
+const hasExactlyKeys = (actual: SnapshotKeyCollection, expected: readonly string[]) => {
   const actualKeys = Object.keys(actual)
   const actualKeySet = new Set(actualKeys)
   return actualKeys.length === expected.length && expected.every((key) => actualKeySet.has(key))
 }
 
+const nestedFieldCollection = (
+  entity: SnapshotEntityCollection,
+  tier: ResearchTier
+): Readonly<Record<string, JSONValue>> | undefined => {
+  const tierEntry = Object.entries(entity).find(([key]) => key === tier)
+  return tierEntry ? JSONObject.parse(tierEntry[1]) : undefined
+}
+
+const hasExactlyNestedKeys = (
+  entity: SnapshotEntityCollection,
+  tier: ResearchTier,
+  expected: readonly string[]
+) => {
+  if (expected.length === 0) {
+    return true
+  }
+  const nested = nestedFieldCollection(entity, tier)
+  return nested !== undefined && hasExactlyKeys(nested, expected)
+}
+
+const isResearchRequest = (request: SnapshotRequest): request is ResearchRequest =>
+  Object.hasOwn(request.person, "research") || Object.hasOwn(request.company, "research")
+
 export const snapshotMatchesRequest = (snapshot: SonarSnapshot, request: SnapshotRequest) => {
-  const questionKeys = Object.keys(request.research ?? request.deepResearch)
+  const tier: ResearchTier = isResearchRequest(request) ? "research" : "deepResearch"
+  const personQuestions = isResearchRequest(request)
+    ? Object.keys(request.person.research ?? {})
+    : Object.keys(request.person.deepResearch ?? {})
+  const companyQuestions = isResearchRequest(request)
+    ? Object.keys(request.company.research ?? {})
+    : Object.keys(request.company.deepResearch ?? {})
+  const personBuiltIns = Object.keys(request.person).filter((key) => key !== tier)
+  const companyBuiltIns = Object.keys(request.company).filter((key) => key !== tier)
   return (
-    hasExactlyKeys(snapshot.data, ["person", "company", ...questionKeys]) &&
-    hasExactlyKeys(snapshot.data.person, request.person) &&
-    hasExactlyKeys(snapshot.data.company, request.company)
+    hasExactlyKeys(snapshot.data, ["person", "company"]) &&
+    hasExactlyKeys(snapshot.data.person, [
+      ...personBuiltIns,
+      ...(personQuestions.length > 0 ? [tier] : []),
+    ]) &&
+    hasExactlyKeys(snapshot.data.company, [
+      ...companyBuiltIns,
+      ...(companyQuestions.length > 0 ? [tier] : []),
+    ]) &&
+    hasExactlyNestedKeys(snapshot.data.person, tier, personQuestions) &&
+    hasExactlyNestedKeys(snapshot.data.company, tier, companyQuestions)
   )
 }
 
-export const requestPaths = (request: SnapshotRequest) => [
-  ...request.person.map((key) => `person.${key}`),
-  ...request.company.map((key) => `company.${key}`),
-  ...Object.keys(request.research ?? request.deepResearch),
-]
+export const requestPaths = (request: SnapshotRequest) => {
+  const tier: ResearchTier = isResearchRequest(request) ? "research" : "deepResearch"
+  const personQuestions = isResearchRequest(request)
+    ? Object.keys(request.person.research ?? {})
+    : Object.keys(request.person.deepResearch ?? {})
+  const companyQuestions = isResearchRequest(request)
+    ? Object.keys(request.company.research ?? {})
+    : Object.keys(request.company.deepResearch ?? {})
+  return [
+    ...Object.keys(request.person)
+      .filter((key) => key !== tier)
+      .map((key) => `person.${key}`),
+    ...Object.keys(request.company)
+      .filter((key) => key !== tier)
+      .map((key) => `company.${key}`),
+    ...personQuestions.map((key) => `person.${tier}.${key}`),
+    ...companyQuestions.map((key) => `company.${tier}.${key}`),
+  ]
+}
 
 export const SonarResponse: z.ZodType<SonarResponse> = jsonBoundary(
   rejectPrototypeKey(

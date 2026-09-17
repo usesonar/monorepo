@@ -1,12 +1,8 @@
-import type { JSONValue, SonarSeed } from "./model.js"
+import { compileResearchRequest } from "@usesonar/api"
 
-type IdentityConfig = {
-  readonly ttl: string
-  readonly person: readonly string[]
-  readonly company: readonly string[]
-  readonly research?: object
-  readonly deepResearch?: object
-}
+import type { AnyDeepResearchConfig, AnyResearchConfig, JSONValue, SonarSeed } from "./model.js"
+
+type IdentityConfig = AnyResearchConfig | AnyDeepResearchConfig
 
 type CanonicalRequest =
   | { readonly tier: "research"; readonly config: IdentityConfig; readonly seed: SonarSeed }
@@ -123,20 +119,30 @@ const normalizedSeed = (seed: SonarSeed) => {
 }
 
 const normalizedConfig = (config: IdentityConfig) => {
-  const questions = config.research ?? config.deepResearch ?? {}
+  // SAFETY: Research configs are compiled before this function, and deep-research configs are
+  // already serializable, so both entity selectors contain only JSON values here.
+  const company = config.company as JSONValue
+  // SAFETY: The same compiled-or-serializable config invariant applies to the person selector.
+  const person = config.person as JSONValue
   return {
-    company: config.company.toSorted(),
-    person: config.person.toSorted(),
-    questions: Object.fromEntries(
-      Object.entries(questions).toSorted(([left], [right]) => compareStrings(left, right))
-    ),
+    company: normalizedJSON(company),
+    person: normalizedJSON(person),
     ttl: normalizedTTL(config.ttl),
   }
 }
 
-export const canonicalRequestIdentity = (request: CanonicalRequest) =>
-  JSON.stringify({
-    config: normalizedConfig(request.config),
+export const canonicalRequestIdentity = (request: CanonicalRequest) => {
+  const config =
+    request.tier === "research"
+      ? (({ seed: _seed, ...compiled }) => compiled)(
+          // SAFETY: The research branch carries an authored ResearchConfig plus a valid SonarSeed;
+          // the API compiler validates and converts it before identity serialization.
+          compileResearchRequest({ ...request.config, seed: request.seed } as never)
+        )
+      : request.config
+  return JSON.stringify({
+    config: normalizedConfig(config),
     seed: normalizedSeed(request.seed),
     tier: request.tier,
   })
+}
